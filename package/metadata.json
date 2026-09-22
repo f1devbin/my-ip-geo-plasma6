@@ -1,0 +1,18 @@
+{
+    "KPlugin": {
+        "Authors": [
+            {
+                "Name": "f1devbin"
+            }
+        ],
+        "Category": "System Information",
+        "Description": "Compact public IP, local network and diagnostics utility for KDE Plasma 6",
+        "Icon": "/icon.png",
+        "Id": "com.f1devbin.myipgeo",
+        "License": "MIT",
+        "Name": "My IP & Geo",
+        "Version": "6.1.34"
+    },
+    "X-Plasma-API-Minimum-Version": "6.0",
+    "KPackageStructure": "Plasma/Applet"
+}
