@@ -32,6 +32,7 @@ PlasmoidItem {
     property var appTraffic: []
     property var appExpanded: ({})
     property string appTrafficStatus: "Ready"
+    property string appRatesState: ""
     property bool dependenciesLoading: false
     property string missingDependencies: ""
     property string installCommand: ""
@@ -338,7 +339,8 @@ PlasmoidItem {
         if (root.toolsTab !== 4 || !featurePanel.visible || root.appTrafficLoading) return
         root.appTrafficLoading = true
         root.appTrafficStatus = "Reading active connections…"
-        appTrafficApi.connectSource("sh -c 'echo __TCP__; ss -Htnp state established 2>/dev/null || echo __FAIL__; echo __UDP__; ss -Hunp 2>/dev/null || echo __FAIL__'")
+        // Connections via ss, then a 3 s per-process traffic sample from KDE System Monitor's helper
+        appTrafficApi.connectSource("sh -c 'echo __TCP__; ss -Htnp state established 2>/dev/null || echo __FAIL__; echo __UDP__; ss -Hunp 2>/dev/null || echo __FAIL__; echo __RATES__; for h in /usr/lib/*/libexec/ksysguard/ksgrd_network_helper /usr/libexec/ksysguard/ksgrd_network_helper /usr/lib/libexec/ksysguard/ksgrd_network_helper; do [ -x \"$h\" ] || continue; timeout 3 \"$h\" 2>/dev/null; echo __RC__$?; break; done'")
     }
 
     function toggleAppExpanded(key) {
@@ -425,6 +427,35 @@ PlasmoidItem {
             rows[r].display = root.appDisplayName(rows[r].process)
         }
         return rows
+    }
+
+    // ksgrd_network_helper (libksysguard, installed with cap_net_raw by the distro package) prints once per second
+    // "HH:MM:SS" or "HH:MM:SS|PID|pid|IN|bytes|OUT|bytes" with the bytes of the last second.
+    // Returns {state: "ok"|"missing"|"failed"|"nodata", rates: {pid: {rx, tx}}}, rates in bytes per second.
+    function parseAppRates(text) {
+        var out = String(text || "")
+        var rc = out.match(/__RC__(\d+)/)
+        if (!rc) return {state: "missing", rates: {}}
+        if (rc[1] !== "124" && rc[1] !== "0") return {state: "failed", rates: {}}
+        var lines = out.split("\n")
+        var stamps = []
+        var sums = {}
+        for (var i = 0; i < lines.length; ++i) {
+            var m = lines[i].trim().match(/^(\d\d:\d\d:\d\d)(?:\|PID\|(-?\d+)\|IN\|(\d+)\|OUT\|(\d+))?$/)
+            if (!m) continue
+            if (stamps.indexOf(m[1]) === -1) stamps.push(m[1])
+            // The first second only covers helper start-up; sockets without a visible owner come as pid -1
+            if (stamps.length < 2 || m[2] === undefined || Number(m[2]) <= 0) continue
+            if (!sums[m[2]]) sums[m[2]] = {rx: 0, tx: 0}
+            sums[m[2]].rx += Number(m[3])
+            sums[m[2]].tx += Number(m[4])
+        }
+        var seconds = stamps.length - 1
+        if (seconds < 1) return {state: "nodata", rates: {}}
+        var rates = {}
+        for (var pid in sums)
+            if (sums.hasOwnProperty(pid)) rates[pid] = {rx: Math.round(sums[pid].rx / seconds), tx: Math.round(sums[pid].tx / seconds)}
+        return {state: "ok", rates: rates}
     }
 
     function appDisplayName(name) {
@@ -534,12 +565,21 @@ PlasmoidItem {
     Plasma5Support.DataSource { id: trafficApi; engine:"executable"; onNewData:function(source,data){trafficApi.disconnectSource(source);var p=String(data.stdout||"").trim().split(/\s+/);if(p.length>=2){root.trafficReceived=root.formatBytes(p[0]);root.trafficSent=root.formatBytes(p[1]);root.trafficUpdated=Qt.formatTime(new Date(),"HH:mm:ss")}} }
     Plasma5Support.DataSource { id: appTrafficApi; engine:"executable"; onNewData:function(source,data){
         appTrafficApi.disconnectSource(source)
-        var rows = root.parseAppConnections(data.stdout)
+        var out = String(data.stdout || "")
+        var cut = out.indexOf("__RATES__")
+        var rows = root.parseAppConnections(cut >= 0 ? out.substring(0, cut) : out)
         if (rows === null) {
             // Keep the last good list on screen
             root.appTrafficStatus = "Could not read connections · " + Qt.formatTime(new Date(), "HH:mm:ss")
             root.appTrafficLoading = false
             return
+        }
+        var rates = root.parseAppRates(cut >= 0 ? out.substring(cut) : "")
+        root.appRatesState = rates.state
+        for (var r = 0; r < rows.length; ++r) {
+            var rate = rates.rates[rows[r].pid]
+            rows[r].rx = rates.state === "ok" ? (rate ? rate.rx : 0) : -1
+            rows[r].tx = rates.state === "ok" ? (rate ? rate.tx : 0) : -1
         }
         var shown = rows.slice(0, 12)
         var present = {}
@@ -1071,7 +1111,7 @@ font.pixelSize:13 }
                             spacing: 5
                             Image { source: Qt.resolvedUrl("../images/github.svg"); sourceSize.width: 18; sourceSize.height: 18; Layout.preferredWidth: 18; Layout.preferredHeight: 18 }
                             Text { text: "GitHub"; color: root.themeLink; font.pixelSize: 13; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: Qt.openUrlExternally("https://github.com/f1devbin") } }
-                            Text { text: "· v6.1.35"; color: root.themeSecondary; font.pixelSize: 9 }
+                            Text { text: "· v6.1.36"; color: root.themeSecondary; font.pixelSize: 9 }
                             Item { Layout.fillWidth: true }
                         }
                     }
@@ -1722,7 +1762,20 @@ font.pixelSize:13 }
                                                 anchors.fill: parent
                                                 anchors.rightMargin: 8
                                                 Text { text: appRow.expanded ? "⌄" : "›"; color: root.themeSecondary; font.pixelSize: 14; Layout.preferredWidth: 22; horizontalAlignment: Text.AlignHCenter }
-                                                Text { text: modelData.display; color: root.themeText; font.pixelSize: 9; elide: Text.ElideRight; Layout.fillWidth: true }
+                                                ColumnLayout {
+                                                    Layout.fillWidth: true
+                                                    spacing: 1
+                                                    Text { text: modelData.display; color: root.themeText; font.pixelSize: 9; elide: Text.ElideRight; Layout.fillWidth: true }
+                                                    Row {
+                                                        visible: modelData.rx >= 0
+                                                        spacing: 3
+                                                        Image { source: Qt.resolvedUrl("../images/arrow-down.svg"); sourceSize.width: 8; sourceSize.height: 10; anchors.verticalCenter: parent.verticalCenter }
+                                                        Text { text: root.formatBytes(modelData.rx) + "/s"; color: root.themeText; font.pixelSize: 8; anchors.verticalCenter: parent.verticalCenter }
+                                                        Item { width: 6; height: 1 }
+                                                        Image { source: Qt.resolvedUrl("../images/arrow-up.svg"); sourceSize.width: 8; sourceSize.height: 10; anchors.verticalCenter: parent.verticalCenter }
+                                                        Text { text: root.formatBytes(modelData.tx) + "/s"; color: root.themeText; font.pixelSize: 8; anchors.verticalCenter: parent.verticalCenter }
+                                                    }
+                                                }
                                                 Text { text: "PID " + modelData.pid; color: root.themeSecondary; font.pixelSize: 8; Layout.preferredWidth: 62; horizontalAlignment: Text.AlignRight }
                                                 Text { text: modelData.tcp; color: root.themeText; font.pixelSize: 8; Layout.preferredWidth: 42; horizontalAlignment: Text.AlignRight }
                                                 Text { text: modelData.udp; color: root.themeText; font.pixelSize: 8; Layout.preferredWidth: 42; horizontalAlignment: Text.AlignRight }
@@ -1764,7 +1817,11 @@ font.pixelSize:13 }
                         }
                     }
                     Text {
-                        text: "Connection counts come from Linux socket information; no root access is required."
+                        text: root.appRatesState === "ok" ? "Traffic: average download/upload over 3 s from the KDE System Monitor helper. Connections: Linux socket information."
+                            : root.appRatesState === "missing" ? "Traffic unavailable: KDE System Monitor helper (ksgrd_network_helper) not found."
+                            : root.appRatesState === "failed" ? "Traffic unavailable: KDE System Monitor helper could not start packet capture."
+                            : root.appRatesState === "nodata" ? "Traffic: no samples received from the KDE System Monitor helper."
+                            : "Connections: Linux socket information. Traffic: KDE System Monitor helper."
                         color: root.themeSecondary
                         font.pixelSize: 8
                         Layout.fillWidth: true

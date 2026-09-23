@@ -1,9 +1,14 @@
 # My IP & Geo
 
-Version 6.1.35
+Version 6.1.36
 
 Compact KDE Plasma 6 widget for public IP/geolocation, local network information and network tools.
 
+## v6.1.36
+- Network Apps: each application shows its current download/upload speed (↓/↑) under its name.
+- Speed is measured per process by KDE System Monitor's own helper `ksgrd_network_helper` (package `libksysguard-bin`, installed with Kubuntu's `plasma-systemmonitor`; the package itself grants it `cap_net_raw`). The widget only runs it; no sudo, setcap or extra packages. TCP and UDP (including QUIC), IPv4 and IPv6; only the current user's processes are attributed.
+- The sample runs for 3 seconds on Apps/Tools open, on the Apps Refresh button and every 10 minutes while Apps is visible; it never runs in the background.
+- If the helper is missing or cannot capture, speeds are hidden and the note under the list says why; connections keep working as before.
 
 ## v6.1.35
 - Network Apps: expanded details show real data instead of `—` and `0`. `ss` omits the State column when the filter selects a single state (`state established` for TCP, connected sockets only for UDP), so fixed field positions pointed at the wrong fields. Endpoints are now located by content; IPv4, bracketed IPv6, IPv4-mapped IPv6, `%interface` scopes and wildcards are handled.
