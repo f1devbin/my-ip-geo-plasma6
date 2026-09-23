@@ -1,8 +1,16 @@
 # My IP & Geo
 
-Version 6.1.36
+Version 6.1.37
 
 Compact KDE Plasma 6 widget for public IP/geolocation, local network information and network tools.
+
+## v6.1.37
+- Network Scanner rebuilt, nmap is no longer needed. Every address is pinged once; to send the ping the kernel resolves the address with ARP, so devices that ignore ping (phones, Windows with a firewall) are found too. Cached ARP entries are re-checked, so devices that have left the network are not listed.
+- Scanner rows show `Router` / `This device` and the reverse DNS name when the router provides one. Green dot: answers ping; amber dot: found via ARP only (Monitor uses ping and may show such a device offline).
+- Previous scan results stay on screen until the new scan finishes; a progress bar runs during the scan (about 10 s for a /24). The default network comes from the Wi-Fi/Ethernet interface, not from a VPN tunnel; networks larger than /22 default to the /24 around this device; ranges up to 1024 addresses can be scanned.
+- Speed Test redesigned: a gauge shows the live speed during the test, then Ping/Jitter, Download and Upload tiles and the Cloudflare server location.
+- Speed Test method (Cloudflare endpoints, curl only): latency is the median time to first byte of 12 empty requests minus the server time from `Server-Timing`, jitter is the mean difference between consecutive samples; download uses 4 parallel streams for up to 8 s; upload uses 4 streams for up to 8 s and counts completed requests only.
+- Scripts live in `contents/code/` (`netscan.sh`, `speedtest.sh`).
 
 ## v6.1.36
 - Network Apps: each application shows its current download/upload speed (↓/↑) under its name.

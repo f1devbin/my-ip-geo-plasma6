@@ -41,6 +41,8 @@ PlasmoidItem {
     property bool scanLoading: false
     property string scanStatus: ""
     property var scanHosts: []
+    property var scanNames: ({})
+    property string scanRunCidr: ""
     property string systemUptime: "—"
 
     property color themeBackgroundRaw: Kirigami.Theme.backgroundColor
@@ -98,11 +100,17 @@ PlasmoidItem {
     property bool vpnActive: false
     property int networkChecksDone: 0
     property string diagnosticsText: ""
-    property string speedDownload: "—"
-    property string speedUpload: "—"
-    property string speedLatency: "—"
-    property string speedStatus: "Ready"
-    property string speedUpdated: "—"
+    property string speedStatus: ""
+    property string speedUpdated: ""
+    property string speedPhase: ""
+    property real speedPingMs: -1
+    property real speedJitterMs: -1
+    property real speedDownMbps: -1
+    property real speedUpMbps: -1
+    property real speedLiveMbps: 0
+    property string speedServer: ""
+    property var speedSamplePrev: ({})
+    property real speedSampleTime: 0
     property string trafficReceived: "—"
     property string trafficSent: "—"
     property string trafficUpdated: "—"
@@ -193,26 +201,109 @@ PlasmoidItem {
         return ((net >>> 24) & 255) + "." + ((net >>> 16) & 255) + "." + ((net >>> 8) & 255) + "." + (net & 255) + "/" + p
     }
 
+    // Absolute path of a script shipped in contents/code, quoted for sh
+    function codePath(name) {
+        var path = decodeURIComponent(String(Qt.resolvedUrl("../code/" + name)).replace(/^file:\/\//, ""))
+        return "'" + path.replace(/'/g, "'\\''") + "'"
+    }
+
+    // Interface for the scanner: a real Ethernet/Wi-Fi link (it has a MAC), not a VPN tunnel
+    function scanInterface() {
+        for (var i = 0; i < root.localItems.length; ++i) {
+            var it = root.localItems[i]
+            var p = it.ipv4Prefix.length ? parseInt(it.ipv4Prefix[0]) : 32
+            if (it.ipv4.length && p <= 30 && it.mac && it.mac !== "—" && it.mac !== "00:00:00:00:00:00") return it
+        }
+        return activeInterface()
+    }
+
     function updateScanDefault() {
-        var item = activeInterface()
+        var item = scanInterface()
         if (!item || !item.ipv4.length || !item.ipv4Prefix.length) return
-        var cidr = ipv4Network(item.ipv4[0], item.ipv4Prefix[0])
+        var prefix = parseInt(item.ipv4Prefix[0])
+        // Networks bigger than /22 are scanned as the /24 around this device
+        var cidr = ipv4Network(item.ipv4[0], prefix < 22 ? 24 : prefix)
         if (cidr && !root.scanCidrUserEdited) root.scanCidr = cidr
     }
 
     function checkDependencies() {
         if (dependenciesLoading) return
         dependenciesLoading = true
-        dependencyApi.connectSource("sh -c 'command -v curl >/dev/null 2>&1 || echo curl; command -v ip >/dev/null 2>&1 || echo iproute2; command -v ping >/dev/null 2>&1 || echo iputils-ping; command -v resolvectl >/dev/null 2>&1 || echo systemd-resolved; command -v nmap >/dev/null 2>&1 || echo nmap; command -v notify-send >/dev/null 2>&1 || echo libnotify-bin'")
+        dependencyApi.connectSource("sh -c 'command -v curl >/dev/null 2>&1 || echo curl; command -v ip >/dev/null 2>&1 || echo iproute2; command -v ping >/dev/null 2>&1 || echo iputils-ping; command -v resolvectl >/dev/null 2>&1 || echo systemd-resolved; command -v notify-send >/dev/null 2>&1 || echo libnotify-bin'")
+    }
+
+    function ipToInt(ip) {
+        var p = String(ip).split(".")
+        return ((+p[0] << 24) >>> 0) + (+p[1] << 16) + (+p[2] << 8) + (+p[3])
+    }
+
+    function scanLabel(ip) {
+        for (var i = 0; i < root.localItems.length; ++i)
+            if (root.localItems[i].ipv4.indexOf(ip) !== -1) return "This device"
+        for (var k in root.gatewayMap)
+            if (root.gatewayMap.hasOwnProperty(k) && root.gatewayMap[k] === ip) return "Router"
+        return ""
+    }
+
+    // netscan.sh output -> devices. Up = answered ping, or answered ARP (neighbour entry REACHABLE).
+    // Cached entries (STALE) do not count: the scan re-validates them, gone devices end up FAILED.
+    function parseScan(text, cidr) {
+        var out = String(text || "")
+        if (out.indexOf("__BADCIDR__") !== -1) return {error: "Invalid network address", hosts: []}
+        var big = out.match(/__TOOBIG__ (\d+)/)
+        if (big) return {error: "Network too large (" + big[1] + " addresses, max 1024)", hosts: []}
+        if (out.indexOf("__NEIGH__") === -1) return {error: "Scan failed", hosts: []}
+        var m = String(cidr).match(/^(\d+\.\d+\.\d+\.\d+)(?:\/(\d+))?$/)
+        if (!m) return {error: "Invalid network address", hosts: []}
+        var bits = m[2] === undefined ? 32 : parseInt(m[2])
+        var mask = bits === 0 ? 0 : (0xffffffff << (32 - bits)) >>> 0
+        var net = (root.ipToInt(m[1]) & mask) >>> 0
+        function inRange(ip) { return ((root.ipToInt(ip) & mask) >>> 0) === net }
+        var own = {}
+        for (var li = 0; li < root.localItems.length; ++li)
+            for (var lj = 0; lj < root.localItems[li].ipv4.length; ++lj)
+                own[root.localItems[li].ipv4[lj]] = String(root.localItems[li].mac || "—").toUpperCase()
+        var found = {}
+        var lines = out.split("\n")
+        var inNeigh = false
+        for (var i = 0; i < lines.length; ++i) {
+            var line = lines[i].trim()
+            if (line === "__NEIGH__") { inNeigh = true; continue }
+            if (!inNeigh) {
+                var up = line.match(/^UP (\d+\.\d+\.\d+\.\d+)$/)
+                if (up && inRange(up[1])) found[up[1]] = {ip: up[1], mac: own[up[1]] || "—", via: "ping"}
+                continue
+            }
+            var n = line.match(/^(\d+\.\d+\.\d+\.\d+)\s+dev\s+\S+(?:\s+lladdr\s+([0-9a-fA-F:]{17}))?.*\s([A-Z]+)$/)
+            if (!n || !inRange(n[1])) continue
+            var mac = n[2] ? n[2].toUpperCase() : ""
+            if (found[n[1]]) {
+                if (mac) found[n[1]].mac = mac
+            } else if (mac && (n[3] === "REACHABLE" || n[3] === "PERMANENT" || n[3] === "NOARP")) {
+                found[n[1]] = {ip: n[1], mac: mac, via: "arp"}
+            }
+        }
+        var hosts = []
+        for (var k in found) if (found.hasOwnProperty(k)) hosts.push(found[k])
+        hosts.sort(function(a, b) { return root.ipToInt(a.ip) - root.ipToInt(b.ip) })
+        return {error: "", hosts: hosts}
     }
 
     function runNetworkScan() {
-        if (scanLoading || !scanCidr) return
+        if (scanLoading) return
+        var cidr = String(scanCidr || "").trim()
+        var m = cidr.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})(?:\/(\d{1,2}))?$/)
+        if (!m || +m[1] > 255 || +m[2] > 255 || +m[3] > 255 || +m[4] > 255 || (m[5] !== undefined && +m[5] > 32)) {
+            scanStatus = "Enter a network like 192.168.1.0/24"
+            return
+        }
+        if (m[5] !== undefined && +m[5] < 22) {
+            scanStatus = "Too large: use /22 or smaller"
+            return
+        }
         scanLoading = true
-        scanStatus = "Scanning…"
-        scanHosts = []
-        var safeCidr = scanCidr.replace(/[^0-9a-fA-F:./]/g, "")
-        scanApi.connectSource("sh -c 'echo __LO__; ip -4 -o addr show dev lo 2>/dev/null | tr -s \" \" | cut -d\" \" -f4; echo __NEIGH__; nmap -sn -PR -n --host-timeout 2s " + safeCidr + " 2>/dev/null; echo __NEIGH2__; ip neigh show'")
+        scanRunCidr = cidr
+        scanApi.connectSource("sh " + codePath("netscan.sh") + " scan " + cidr)
     }
 
     function saveWatchedDevices() {
@@ -471,14 +562,145 @@ PlasmoidItem {
     function runSpeedTest() {
         if (speedLoading) return
         speedLoading = true
-        speedStatus = "Testing…"
-        speedApi.connectSource("sh -c 'curl -4 -fsS -o /dev/null -w \"LATENCY %{time_total}\n\" --max-time 10 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null; curl -4 -L -fsS -o /dev/null -w \"DOWNLOAD %{speed_download}\n\" --max-time 25 https://speed.cloudflare.com/__down?bytes=25000000 2>/dev/null; dd if=/dev/zero bs=1M count=10 2>/dev/null | curl -4 -fsS -o /dev/null -w \"UPLOAD %{speed_upload}\n\" --max-time 25 -X POST --data-binary @- https://speed.cloudflare.com/__up 2>/dev/null'")
+        speedPingMs = -1
+        speedJitterMs = -1
+        speedDownMbps = -1
+        speedUpMbps = -1
+        speedServer = ""
+        startSpeedPhase("ping")
     }
 
-    function formatMbps(bytesPerSecond) {
-        var n = Number(bytesPerSecond)
-        if (!isFinite(n) || n <= 0) return "—"
-        return (n * 8 / 1000000).toFixed(1) + " Mbps"
+    function startSpeedPhase(phase) {
+        speedLiveMbps = 0
+        speedSamplePrev = ({})
+        speedSampleTime = 0
+        speedPhase = phase
+        speedStatus = phase === "ping" ? "Measuring ping…" : (phase === "download" ? "Measuring download…" : "Measuring upload…")
+        var cmd = "sh " + codePath("speedtest.sh") + " " + (phase === "download" ? "down" : (phase === "upload" ? "up" : "ping"))
+        Qt.callLater(function() { speedApi.connectSource(cmd) })
+    }
+
+    function finishSpeedTest(error) {
+        speedLoading = false
+        speedLiveMbps = 0
+        speedUpdated = Qt.formatTime(new Date(), "HH:mm:ss")
+        if (error) {
+            speedPhase = "error"
+            speedStatus = error
+        } else {
+            speedPhase = "done"
+            speedStatus = speedDownMbps < 0 || speedUpMbps < 0 ? "Completed with errors" : "Completed"
+        }
+    }
+
+    // Cloudflare's method: time to first byte of empty requests minus the server time from
+    // Server-Timing; latency = median, jitter = mean difference between consecutive samples
+    function parseSpeedPing(text) {
+        var lines = String(text || "").split("\n")
+        var samples = []
+        var colo = ""
+        for (var i = 0; i < lines.length; ++i) {
+            var m = lines[i].trim().match(/^PING\s+([\d.]+)\s+([\d.]+)\s+(\d+)\s+(\S*)\|(.*)$/)
+            if (!m || m[3] !== "200") continue
+            var ms = (parseFloat(m[2]) - parseFloat(m[1])) * 1000
+            var st = m[5].match(/cfReq(?:uest)?Dur(?:ation)?;\s*dur=([0-9.]+)/i)
+            if (st) ms -= parseFloat(st[1])
+            if (ms > 0) samples.push(ms)
+            var ray = m[4].match(/-([A-Za-z]{3})$/)
+            if (ray) colo = ray[1].toUpperCase()
+        }
+        if (samples.length < 3) return null
+        var sorted = samples.slice().sort(function(a, b) { return a - b })
+        var mid = Math.floor(sorted.length / 2)
+        var jitter = 0
+        for (var j = 1; j < samples.length; ++j) jitter += Math.abs(samples[j] - samples[j - 1])
+        return {
+            ping: sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2,
+            jitter: jitter / (samples.length - 1),
+            colo: colo
+        }
+    }
+
+    // 4 parallel streams: all received bytes over the longest transfer time
+    function parseSpeedDown(text) {
+        var lines = String(text || "").split("\n")
+        var bytes = 0
+        var longest = 0
+        for (var i = 0; i < lines.length; ++i) {
+            var m = lines[i].trim().match(/^DOWN\s+(\d+)\s+([\d.]+)\s+([\d.]+)\s+(\d+)$/)
+            if (!m || m[4] !== "200" || +m[1] <= 0) continue
+            var t = parseFloat(m[3]) - parseFloat(m[2])
+            if (t <= 0) continue
+            bytes += +m[1]
+            longest = Math.max(longest, t)
+        }
+        return longest > 0 ? bytes * 8 / longest / 1e6 : -1
+    }
+
+    // Completed upload requests only; streams run in parallel, so their rates add up
+    function parseSpeedUp(text) {
+        var lines = String(text || "").split("\n")
+        var streams = {}
+        for (var i = 0; i < lines.length; ++i) {
+            var m = lines[i].trim().match(/^UP\s+(\d+)\s+(\d+)\s+([\d.]+)\s+([\d.]+)$/)
+            if (!m) continue
+            var t = parseFloat(m[4]) - parseFloat(m[3])
+            if (t <= 0 || +m[2] <= 0) continue
+            if (!streams[m[1]]) streams[m[1]] = {bytes: 0, time: 0}
+            streams[m[1]].bytes += +m[2]
+            streams[m[1]].time += t
+        }
+        var mbps = 0
+        var any = false
+        for (var k in streams) {
+            if (!streams.hasOwnProperty(k)) continue
+            mbps += streams[k].bytes * 8 / streams[k].time / 1e6
+            any = true
+        }
+        return any ? mbps : -1
+    }
+
+    function formatSpeed(mbps) {
+        if (!(mbps >= 0)) return "—"
+        if (mbps < 10) return mbps.toFixed(2)
+        if (mbps < 100) return mbps.toFixed(1)
+        return String(Math.round(mbps))
+    }
+
+    // Log scale 0..1000 Mbps for the gauge arc
+    function gaugeFraction(mbps) {
+        return Math.min(1, Math.log(1 + Math.max(0, mbps)) / Math.log(1001))
+    }
+
+    function cssColor(c, a) {
+        return "rgba(" + Math.round(c.r * 255) + "," + Math.round(c.g * 255) + "," + Math.round(c.b * 255) + "," + a + ")"
+    }
+
+    // Live gauge value from /proc/net/dev. With a VPN the same bytes pass two interfaces,
+    // so the busiest interface is used instead of the sum.
+    function applySpeedSample(text) {
+        if (root.speedPhase !== "download" && root.speedPhase !== "upload") return
+        var now = Date.now()
+        var cur = {}
+        var lines = String(text || "").split("\n")
+        for (var i = 0; i < lines.length; ++i) {
+            var m = lines[i].match(/^\s*([^:\s]+):\s*(\d+)(?:\s+\d+){7}\s+(\d+)/)
+            if (m && m[1] !== "lo") cur[m[1]] = {rx: +m[2], tx: +m[3]}
+        }
+        var dt = (now - root.speedSampleTime) / 1000
+        if (root.speedSampleTime > 0 && dt > 0.2) {
+            var best = 0
+            for (var k in cur) {
+                var prev = root.speedSamplePrev[k]
+                if (!cur.hasOwnProperty(k) || !prev) continue
+                var d = root.speedPhase === "upload" ? cur[k].tx - prev.tx : cur[k].rx - prev.rx
+                if (d > best) best = d
+            }
+            var mbps = best * 8 / dt / 1e6
+            root.speedLiveMbps = root.speedLiveMbps > 0 ? root.speedLiveMbps * 0.35 + mbps * 0.65 : mbps
+        }
+        root.speedSamplePrev = cur
+        root.speedSampleTime = now
     }
 
     function formatBytes(bytes) {
@@ -561,7 +783,38 @@ PlasmoidItem {
     Plasma5Support.DataSource { id: ipv6CheckApi; engine:"executable"; onNewData:function(source,data){ipv6CheckApi.disconnectSource(source);root.ipv6Status=String(data.stdout||"").trim();if(root.ipv6Status==="FAIL")root.ipv6Status="UNAVAILABLE";root.networkCheckDone()} }
     Plasma5Support.DataSource { id: diagnosticsApi; engine:"executable"; onNewData:function(source,data){diagnosticsApi.disconnectSource(source);root.diagnosticsText=String(data.stdout||"").trim();root.diagnosticsLoading=false} }
     Plasma5Support.DataSource { id: latencyApi; engine:"executable"; onNewData:function(source,data){latencyApi.disconnectSource(source);var s=String(data.stdout||"").trim();if(s)root.latency=s} }
-    Plasma5Support.DataSource { id: speedApi; engine:"executable"; onNewData:function(source,data){speedApi.disconnectSource(source);var lines=String(data.stdout||"").trim().split("\n");var ok=false;var errors=0;for(var i=0;i<lines.length;++i){var line=lines[i].trim();if(line.indexOf("LATENCY ")===0){var lv=Number(line.substring(8))*1000;if(isFinite(lv)&&lv>0){root.speedLatency=Math.round(lv)+" ms";ok=true}else{errors++}}else if(line.indexOf("DOWNLOAD ")===0){var dv=line.substring(9);if(Number(dv)>0){root.speedDownload=root.formatMbps(dv);ok=true}else{errors++}}else if(line.indexOf("UPLOAD ")===0){var uv=line.substring(7);if(Number(uv)>0){root.speedUpload=root.formatMbps(uv);ok=true}else{errors++}}else if(line.indexOf("_ERROR")!==-1){errors++}}root.speedLoading=false;root.speedUpdated=Qt.formatTime(new Date(),"HH:mm:ss");root.speedStatus=ok?(errors?"Completed with limited results":"Test completed"):"Test failed"} }
+    Plasma5Support.DataSource {
+        id: speedApi; engine: "executable"
+        onNewData: function(source, data) {
+            speedApi.disconnectSource(source)
+            var out = String(data.stdout || "")
+            if (root.speedPhase === "ping") {
+                var p = root.parseSpeedPing(out)
+                if (!p) { root.finishSpeedTest("Cloudflare is not reachable"); return }
+                root.speedPingMs = p.ping
+                root.speedJitterMs = p.jitter
+                root.speedServer = p.colo
+                root.startSpeedPhase("download")
+            } else if (root.speedPhase === "download") {
+                root.speedDownMbps = root.parseSpeedDown(out)
+                root.startSpeedPhase("upload")
+            } else if (root.speedPhase === "upload") {
+                root.speedUpMbps = root.parseSpeedUp(out)
+                root.finishSpeedTest("")
+            }
+        }
+    }
+    Plasma5Support.DataSource {
+        id: speedSampleApi; engine: "executable"
+        onNewData: function(source, data) { speedSampleApi.disconnectSource(source); root.applySpeedSample(data.stdout) }
+    }
+    // Live gauge: interface byte counters twice a second, only while a transfer runs
+    Timer {
+        interval: 500
+        repeat: true
+        running: root.speedPhase === "download" || root.speedPhase === "upload"
+        onTriggered: speedSampleApi.connectSource("cat /proc/net/dev")
+    }
     Plasma5Support.DataSource { id: trafficApi; engine:"executable"; onNewData:function(source,data){trafficApi.disconnectSource(source);var p=String(data.stdout||"").trim().split(/\s+/);if(p.length>=2){root.trafficReceived=root.formatBytes(p[0]);root.trafficSent=root.formatBytes(p[1]);root.trafficUpdated=Qt.formatTime(new Date(),"HH:mm:ss")}} }
     Plasma5Support.DataSource { id: appTrafficApi; engine:"executable"; onNewData:function(source,data){
         appTrafficApi.disconnectSource(source)
@@ -598,7 +851,33 @@ PlasmoidItem {
         root.appTrafficLoading = false
     } }
     Plasma5Support.DataSource { id: dependencyApi; engine:"executable"; onNewData:function(source,data){dependencyApi.disconnectSource(source);var out=String(data.stdout||"").trim();root.missingDependencies=out.replace(/^\s+|\s+$/g,"").replace(/\n+/g," ");var pkgs=root.missingDependencies.trim().split(/\s+/).filter(function(x){return x});root.installCommand=pkgs.length?"sudo apt install "+pkgs.join(" "):"";root.dependenciesLoading=false} }
-    Plasma5Support.DataSource { id: scanApi; engine:"executable"; onNewData:function(source,data){scanApi.disconnectSource(source);var lines=String(data.stdout||"").split("\n");var hosts=[];var neighbors={};var loIps={};var currentIp="";var currentMac="—";var inLo=false;var inNeighbors=false;function pushCurrent(){if(currentIp&&!loIps[currentIp])hosts.push({ip:currentIp,mac:currentMac||"—"})}for(var i=0;i<lines.length;++i){var line=lines[i].trim();if(line==="__LO__"){inLo=true;inNeighbors=false;continue}if(line==="__NEIGH__"){inLo=false;inNeighbors=false;continue}if(line==="__NEIGH2__"){pushCurrent();currentIp="";currentMac="—";inLo=false;inNeighbors=true;continue}if(inLo){var lm=line.match(/^([0-9A-Fa-f:.]+)\/\d+$/);if(lm)loIps[lm[1]]=true;continue}if(inNeighbors){var nm=line.match(/^([0-9A-Fa-f:.]+)\s+dev\s+\S+\s+lladdr\s+([0-9A-Fa-f:]{17})/);if(nm)neighbors[nm[1]]=nm[2].toUpperCase();continue}var m=line.match(/^Nmap scan report for (.+)$/);if(m){pushCurrent();var report=m[1].trim();var ipMatch=report.match(/\(([0-9A-Fa-f:.]+)\)$/);currentIp=ipMatch?ipMatch[1]:report;currentMac="—";continue}var mm=line.match(/^MAC Address:\s+([0-9A-Fa-f:]{17})/);if(mm)currentMac=mm[1].toUpperCase()}pushCurrent();for(var h=0;h<hosts.length;++h){if((!hosts[h].mac||hosts[h].mac==="—")&&neighbors[hosts[h].ip])hosts[h].mac=neighbors[hosts[h].ip]}root.scanHosts=hosts;root.scanStatus=hosts.length?(hosts.length+" active host"+(hosts.length===1?"":"s")):"No active hosts found";root.scanLoading=false} }
+    Plasma5Support.DataSource {
+        id: scanApi; engine: "executable"
+        onNewData: function(source, data) {
+            scanApi.disconnectSource(source)
+            root.scanLoading = false
+            var r = root.parseScan(data.stdout, root.scanRunCidr)
+            if (r.error) { root.scanStatus = r.error; return }
+            root.scanHosts = r.hosts
+            root.scanStatus = r.hosts.length + " device" + (r.hosts.length === 1 ? "" : "s") + " · " + Qt.formatTime(new Date(), "HH:mm:ss")
+            var ips = []
+            for (var i = 0; i < r.hosts.length; ++i) ips.push(r.hosts[i].ip)
+            if (ips.length) scanNamesApi.connectSource("sh " + root.codePath("netscan.sh") + " names " + ips.join(" "))
+        }
+    }
+    Plasma5Support.DataSource {
+        id: scanNamesApi; engine: "executable"
+        onNewData: function(source, data) {
+            scanNamesApi.disconnectSource(source)
+            var names = {}
+            var lines = String(data.stdout || "").split("\n")
+            for (var i = 0; i < lines.length; ++i) {
+                var m = lines[i].trim().match(/^(\d+\.\d+\.\d+\.\d+)\s+(\S+)$/)
+                if (m) names[m[1]] = m[2]
+            }
+            root.scanNames = names
+        }
+    }
     Plasma5Support.DataSource { id: monitorApi; engine:"executable"; onNewData:function(source,data){
         monitorApi.disconnectSource(source)
         var lines=String(data.stdout||"").split("\n")
@@ -1111,7 +1390,7 @@ font.pixelSize:13 }
                             spacing: 5
                             Image { source: Qt.resolvedUrl("../images/github.svg"); sourceSize.width: 18; sourceSize.height: 18; Layout.preferredWidth: 18; Layout.preferredHeight: 18 }
                             Text { text: "GitHub"; color: root.themeLink; font.pixelSize: 13; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: Qt.openUrlExternally("https://github.com/f1devbin") } }
-                            Text { text: "· v6.1.36"; color: root.themeSecondary; font.pixelSize: 9 }
+                            Text { text: "· v6.1.37"; color: root.themeSecondary; font.pixelSize: 9 }
                             Item { Layout.fillWidth: true }
                         }
                     }
@@ -1349,8 +1628,13 @@ font.pixelSize:13 }
                     spacing: 6
                     visible: root.toolsTab === 0
 
+                    RowLayout {
+                        Layout.fillWidth: true
+                        Text { text: "Network Scanner"; color: root.themeText; font.pixelSize: 13; font.bold: true; Layout.fillWidth: true }
+                        Text { text: root.scanLoading ? "Scanning…" : root.scanStatus; color: root.scanLoading ? root.themeHighlight : root.themeSecondary; font.pixelSize: 8 }
+                    }
                     Text {
-                        text: root.scanCidr !== "" ? "Default network: " + root.scanCidr : "Network will be detected from Local IPs"
+                        text: "Finds every device on the network, including ones that ignore ping (they still answer ARP). A scan takes about 10 seconds."
                         color: root.themeSecondary
                         font.pixelSize: 9
                         Layout.fillWidth: true
@@ -1363,18 +1647,46 @@ font.pixelSize:13 }
                             id: scanField
                             Layout.fillWidth: true
                             text: root.scanCidr
-                            placeholderText: "Network / CIDR"
+                            placeholderText: "Network, e.g. 192.168.1.0/24"
                             font.pixelSize: 10
                             selectByMouse: true
                             onEditingFinished: {
                                 root.scanCidr = text.trim()
                                 root.scanCidrUserEdited = true
                             }
+                            onAccepted: {
+                                root.scanCidr = text.trim()
+                                root.scanCidrUserEdited = true
+                                root.runNetworkScan()
+                            }
                         }
                         Controls.Button {
-                            text: root.scanLoading ? "…" : "Scan"
-                            enabled: !root.scanLoading && root.scanCidr !== "" && root.missingDependencies.indexOf("nmap") === -1
+                            text: root.scanLoading ? "Scanning…" : "Scan"
+                            enabled: !root.scanLoading && root.scanCidr !== "" && root.missingDependencies.indexOf("iputils-ping") === -1
                             onClicked: root.runNetworkScan()
+                        }
+                    }
+                    Rectangle {
+                        id: scanBar
+                        visible: root.scanLoading
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: 3
+                        radius: 1.5
+                        color: root.alpha(root.themeText, .08)
+                        clip: true
+                        Rectangle {
+                            id: scanBarFill
+                            width: scanBar.width * 0.3
+                            height: scanBar.height
+                            radius: 1.5
+                            color: root.themeHighlight
+                            NumberAnimation on x {
+                                from: -scanBarFill.width
+                                to: scanBar.width
+                                duration: 1400
+                                loops: Animation.Infinite
+                                running: scanBar.visible
+                            }
                         }
                     }
                     RowLayout {
@@ -1407,56 +1719,22 @@ font.pixelSize:13 }
                         wrapMode: TextEdit.Wrap
                         Layout.preferredHeight: Math.max(18, contentHeight)
                     }
-                    Text {
-                        visible: root.scanStatus !== ""
-                        text: root.scanStatus
-                        color: root.themeSecondary
-                        font.pixelSize: 9
-                        Layout.fillWidth: true
-                    }
 
-                    // Scanner results use a fixed three-column grid so the
-                    // headers and every cell stay aligned. Status is shown
-                    // by the dot next to the IP; there is no separate status column.
                     Rectangle {
                         Layout.fillWidth: true
-                        Layout.preferredHeight: 28
+                        Layout.preferredHeight: 26
                         radius: 6
                         color: root.alpha(root.themeText, .035)
                         border.width: 1
                         border.color: root.alpha(root.themeText, .12)
-
                         RowLayout {
                             anchors.fill: parent
                             anchors.leftMargin: 8
                             anchors.rightMargin: 5
                             spacing: 6
-
-                            Text {
-                                Layout.preferredWidth: 145
-                                text: "IP address"
-                                color: root.themeText
-                                font.pixelSize: 9
-                                font.bold: true
-                                verticalAlignment: Text.AlignVCenter
-                            }
-                            Text {
-                                Layout.preferredWidth: 150
-                                text: "MAC address"
-                                color: root.themeText
-                                font.pixelSize: 9
-                                font.bold: true
-                                verticalAlignment: Text.AlignVCenter
-                            }
-                            Text {
-                                Layout.fillWidth: true
-                                text: "Action"
-                                color: root.themeText
-                                font.pixelSize: 9
-                                font.bold: true
-                                horizontalAlignment: Text.AlignHCenter
-                                verticalAlignment: Text.AlignVCenter
-                            }
+                            Text { Layout.fillWidth: true; text: "Device"; color: root.themeText; font.pixelSize: 9; font.bold: true }
+                            Text { Layout.preferredWidth: 112; text: "MAC address"; color: root.themeText; font.pixelSize: 9; font.bold: true }
+                            Text { Layout.preferredWidth: 44; text: "Monitor"; color: root.themeText; font.pixelSize: 9; font.bold: true; horizontalAlignment: Text.AlignHCenter }
                         }
                     }
 
@@ -1472,17 +1750,27 @@ font.pixelSize:13 }
                         Column {
                             id: scanHostColumn
                             width: parent.width
-                            spacing: 2
+                            spacing: 3
 
                             Repeater {
                                 model: root.scanHosts
                                 delegate: Rectangle {
+                                    id: hostRow
+                                    // "Router" / "This device" and the reverse DNS name, when known
+                                    readonly property string note: {
+                                        var parts = []
+                                        var label = root.scanLabel(modelData.ip)
+                                        if (label) parts.push(label)
+                                        var name = root.scanNames[modelData.ip]
+                                        if (name) parts.push(name)
+                                        return parts.join(" · ")
+                                    }
                                     width: scanHostColumn.width
-                                    height: 32
-                                    radius: 4
-                                    color: root.alpha(root.themePositive, .055)
+                                    height: 38
+                                    radius: 6
+                                    color: root.alpha(root.themeText, .045)
                                     border.width: 1
-                                    border.color: root.alpha(root.themeText, .10)
+                                    border.color: root.alpha(root.themeText, .08)
 
                                     RowLayout {
                                         anchors.fill: parent
@@ -1490,57 +1778,78 @@ font.pixelSize:13 }
                                         anchors.rightMargin: 5
                                         spacing: 6
 
-                                        RowLayout {
-                                            Layout.preferredWidth: 145
-                                            spacing: 6
-
-                                            Rectangle {
-                                                Layout.preferredWidth: 8
-                                                Layout.preferredHeight: 8
-                                                radius: 4
-                                                color: root.themePositive
-                                            }
-
+                                        Rectangle {
+                                            Layout.preferredWidth: 8
+                                            Layout.preferredHeight: 8
+                                            radius: 4
+                                            color: modelData.via === "ping" ? root.themePositive : "#e0a030"
+                                        }
+                                        ColumnLayout {
+                                            Layout.fillWidth: true
+                                            spacing: 0
                                             TextEdit {
                                                 Layout.fillWidth: true
                                                 text: modelData.ip
                                                 color: root.themeText
                                                 font.pixelSize: 10
-                                                verticalAlignment: Text.AlignVCenter
                                                 readOnly: true
                                                 selectByMouse: true
                                                 selectByKeyboard: true
                                                 cursorVisible: false
                                             }
+                                            Text {
+                                                visible: hostRow.note !== ""
+                                                Layout.fillWidth: true
+                                                text: hostRow.note
+                                                color: root.themeLink
+                                                font.pixelSize: 9
+                                                elide: Text.ElideRight
+                                            }
                                         }
-
                                         TextEdit {
-                                            Layout.preferredWidth: 150
+                                            Layout.preferredWidth: 112
                                             text: modelData.mac
-                                            color: root.themeSecondary
+                                            color: root.themeText
                                             font.pixelSize: 9
-                                            verticalAlignment: Text.AlignVCenter
                                             readOnly: true
                                             selectByMouse: true
                                             selectByKeyboard: true
                                             cursorVisible: false
                                         }
-
-                                        Controls.Button {
-                                            text: {
-                                                var watching = false
-                                                for (var wi = 0; wi < root.watchedDevices.length; ++wi) {
-                                                    if (root.watchedDevices[wi].ip === modelData.ip) { watching = true; break }
+                                        Item {
+                                            Layout.preferredWidth: 44
+                                            Layout.fillHeight: true
+                                            Controls.Button {
+                                                anchors.centerIn: parent
+                                                width: 30
+                                                height: 26
+                                                text: {
+                                                    var watching = false
+                                                    for (var wi = 0; wi < root.watchedDevices.length; ++wi) {
+                                                        if (root.watchedDevices[wi].ip === modelData.ip) { watching = true; break }
+                                                    }
+                                                    return watching ? "−" : "+"
                                                 }
-                                                return watching ? "−" : "+"
+                                                onClicked: root.toggleWatchedDevice(modelData.ip, modelData.mac)
                                             }
-                                            Layout.preferredWidth: 30
-                                            Layout.preferredHeight: 26
-                                            onClicked: root.toggleWatchedDevice(modelData.ip, modelData.mac)
                                         }
                                     }
                                 }
                             }
+                        }
+                    }
+                    Row {
+                        visible: root.scanHosts.length > 0
+                        spacing: 12
+                        Row {
+                            spacing: 4
+                            Rectangle { width: 7; height: 7; radius: 3.5; color: root.themePositive; anchors.verticalCenter: parent.verticalCenter }
+                            Text { text: "answers ping"; color: root.themeText; font.pixelSize: 8 }
+                        }
+                        Row {
+                            spacing: 4
+                            Rectangle { width: 7; height: 7; radius: 3.5; color: "#e0a030"; anchors.verticalCenter: parent.verticalCenter }
+                            Text { text: "ignores ping, found via ARP (Monitor pings, so it may show offline)"; color: root.themeText; font.pixelSize: 8 }
                         }
                     }
                 }
@@ -1645,53 +1954,218 @@ font.pixelSize:13 }
 
                 ColumnLayout {
                     anchors.fill: parent
-                    spacing: 8
+                    spacing: 7
                     visible: root.toolsTab === 3
+
                     RowLayout {
                         Layout.fillWidth: true
-                        Text { text: "Network Speed"; color: root.themeText; font.pixelSize: 13; font.bold: true; Layout.fillWidth: true }
-                        Text { text: root.speedStatus; color: root.speedLoading ? root.themeHighlight : root.themeSecondary; font.pixelSize: 9 }
+                        Text { text: "Speed Test"; color: root.themeText; font.pixelSize: 13; font.bold: true; Layout.fillWidth: true }
+                        Text {
+                            text: root.speedLoading || root.speedUpdated === "" ? (root.speedStatus !== "" ? root.speedStatus : "Cloudflare · IPv4") : root.speedStatus + " · " + root.speedUpdated
+                            color: root.speedPhase === "error" ? root.themeNegative : (root.speedLoading ? root.themeHighlight : root.themeSecondary)
+                            font.pixelSize: 8
+                        }
                     }
-                    Text { text: "Cloudflare network test"; color: root.themeSecondary; font.pixelSize: 9; Layout.fillWidth: true }
+
+                    Item {
+                        id: speedGauge
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        Layout.minimumHeight: 120
+                        readonly property bool transfer: root.speedPhase === "download" || root.speedPhase === "upload"
+                        readonly property color accent: root.speedPhase === "upload" ? "#ff4040" : (root.speedPhase === "ping" ? "#35d07f" : "#69a9ff")
+                        readonly property real radius: Math.max(40, Math.min((width - 24) / 2, (height - 14) / 1.72))
+                        readonly property real centerY: radius + 9
+                        property real shown: transfer ? root.speedLiveMbps : (root.speedPhase === "done" ? Math.max(0, root.speedDownMbps) : 0)
+                        property real spin: 0
+                        Behavior on shown { NumberAnimation { duration: 450; easing.type: Easing.OutCubic } }
+                        NumberAnimation on spin { from: 0; to: 1; duration: 1100; loops: Animation.Infinite; running: root.speedPhase === "ping" && speedGauge.visible }
+                        onShownChanged: gaugeCanvas.requestPaint()
+                        onSpinChanged: gaugeCanvas.requestPaint()
+                        onAccentChanged: gaugeCanvas.requestPaint()
+                        onWidthChanged: gaugeCanvas.requestPaint()
+                        onHeightChanged: gaugeCanvas.requestPaint()
+                        Connections { target: root; function onSpeedPhaseChanged() { gaugeCanvas.requestPaint() } }
+
+                        Canvas {
+                            id: gaugeCanvas
+                            anchors.fill: parent
+                            onPaint: {
+                                var ctx = getContext("2d")
+                                ctx.reset()
+                                var r = speedGauge.radius
+                                var cx = width / 2
+                                var cy = speedGauge.centerY
+                                var start = 0.75 * Math.PI
+                                var sweep = 1.5 * Math.PI
+                                ctx.lineCap = "round"
+                                ctx.lineWidth = 10
+                                ctx.strokeStyle = root.cssColor(root.themeText, 0.10)
+                                ctx.beginPath()
+                                ctx.arc(cx, cy, r, start, start + sweep, false)
+                                ctx.stroke()
+                                ctx.strokeStyle = root.cssColor(speedGauge.accent, 1)
+                                if (root.speedPhase === "ping") {
+                                    var seg = 0.22 * sweep
+                                    var a = start + (sweep - seg) * speedGauge.spin
+                                    ctx.beginPath()
+                                    ctx.arc(cx, cy, r, a, a + seg, false)
+                                    ctx.stroke()
+                                } else {
+                                    var f = root.gaugeFraction(speedGauge.shown)
+                                    if (f > 0.003) {
+                                        ctx.beginPath()
+                                        ctx.arc(cx, cy, r, start, start + sweep * f, false)
+                                        ctx.stroke()
+                                    }
+                                }
+                                ctx.fillStyle = root.cssColor(root.themeText, 0.65)
+                                ctx.font = "9px sans-serif"
+                                ctx.textAlign = "center"
+                                ctx.textBaseline = "middle"
+                                var marks = [0, 10, 50, 100, 250, 500, 1000]
+                                for (var i = 0; i < marks.length; ++i) {
+                                    var ang = start + sweep * root.gaugeFraction(marks[i])
+                                    var lr = r - 21
+                                    ctx.fillText(marks[i] === 1000 ? "1G" : String(marks[i]), cx + lr * Math.cos(ang), cy + lr * Math.sin(ang))
+                                }
+                            }
+                        }
+
+                        Column {
+                            anchors.horizontalCenter: parent.horizontalCenter
+                            y: speedGauge.centerY - height / 2 + 4
+                            spacing: 0
+                            Text {
+                                anchors.horizontalCenter: parent.horizontalCenter
+                                text: root.speedPhase === "ping" ? (root.speedPingMs >= 0 ? String(Math.round(root.speedPingMs)) : "…")
+                                    : (speedGauge.transfer || root.speedPhase === "done" ? root.formatSpeed(speedGauge.shown) : "—")
+                                color: root.themeText
+                                font.pixelSize: Math.round(Math.max(22, speedGauge.radius * 0.40))
+                                font.bold: true
+                            }
+                            Text {
+                                anchors.horizontalCenter: parent.horizontalCenter
+                                text: root.speedPhase === "ping" ? "ms" : "Mbps"
+                                color: root.themeText
+                                font.pixelSize: 10
+                            }
+                            Text {
+                                anchors.horizontalCenter: parent.horizontalCenter
+                                text: root.speedPhase === "ping" ? "Ping" : (root.speedPhase === "upload" ? "Upload"
+                                    : (root.speedPhase === "download" || root.speedPhase === "done" ? "Download" : (root.speedPhase === "error" ? "Failed" : "Ready")))
+                                color: root.speedPhase === "error" ? root.themeNegative : speedGauge.accent
+                                font.pixelSize: 10
+                                font.bold: true
+                            }
+                        }
+                    }
+
                     RowLayout {
-                        Layout.fillWidth: true; spacing: 6
-                        Rectangle {
-                            Layout.fillWidth: true; Layout.preferredHeight: 88; radius: 10
-                            color: root.alpha(root.themeText, .045); border.width: 1; border.color: root.alpha(root.themeText, .09)
-                            ColumnLayout { anchors.centerIn: parent; spacing: 2
-                                Text { text: "↓"; color: root.themeHighlight; font.pixelSize: 15; horizontalAlignment: Text.AlignHCenter; Layout.fillWidth: true }
-                                Text { text: root.speedDownload === "—" ? "—" : root.speedDownload.replace(" Mbps", ""); color: root.themeText; font.pixelSize: 20; font.bold: true; horizontalAlignment: Text.AlignHCenter; Layout.fillWidth: true }
-                                Text { text: "Mbps  ·  Download"; color: root.themeSecondary; font.pixelSize: 8; horizontalAlignment: Text.AlignHCenter; Layout.fillWidth: true }
-                            }
-                        }
-                        Rectangle {
-                            Layout.fillWidth: true; Layout.preferredHeight: 88; radius: 10
-                            color: root.alpha(root.themeText, .045); border.width: 1; border.color: root.alpha(root.themeText, .09)
-                            ColumnLayout { anchors.centerIn: parent; spacing: 2
-                                Text { text: "↑"; color: root.themeHighlight; font.pixelSize: 15; horizontalAlignment: Text.AlignHCenter; Layout.fillWidth: true }
-                                Text { text: root.speedUpload === "—" ? "—" : root.speedUpload.replace(" Mbps", ""); color: root.themeText; font.pixelSize: 20; font.bold: true; horizontalAlignment: Text.AlignHCenter; Layout.fillWidth: true }
-                                Text { text: "Mbps  ·  Upload"; color: root.themeSecondary; font.pixelSize: 8; horizontalAlignment: Text.AlignHCenter; Layout.fillWidth: true }
+                        Layout.fillWidth: true
+                        spacing: 6
+                        Repeater {
+                            model: [
+                                {key: "ping", title: "Ping", tint: "#35d07f", icon: ""},
+                                {key: "download", title: "Download", tint: "#69a9ff", icon: "../images/arrow-down.svg"},
+                                {key: "upload", title: "Upload", tint: "#ff4040", icon: "../images/arrow-up.svg"}
+                            ]
+                            delegate: Rectangle {
+                                readonly property bool active: root.speedPhase === modelData.key
+                                readonly property color tint: modelData.tint
+                                readonly property real result: modelData.key === "ping" ? root.speedPingMs : (modelData.key === "download" ? root.speedDownMbps : root.speedUpMbps)
+                                Layout.fillWidth: true
+                                Layout.preferredHeight: 60
+                                radius: 10
+                                color: active ? root.alpha(tint, .10) : root.alpha(root.themeText, .045)
+                                border.width: active ? 1.5 : 1
+                                border.color: active ? tint : root.alpha(root.themeText, .08)
+                                ColumnLayout {
+                                    anchors.fill: parent
+                                    anchors.leftMargin: 9
+                                    anchors.rightMargin: 6
+                                    anchors.topMargin: 6
+                                    anchors.bottomMargin: 6
+                                    spacing: 1
+                                    Row {
+                                        spacing: 5
+                                        Image {
+                                            visible: modelData.icon !== ""
+                                            source: modelData.icon !== "" ? Qt.resolvedUrl(modelData.icon) : ""
+                                            sourceSize.width: 9
+                                            sourceSize.height: 11
+                                            anchors.verticalCenter: parent.verticalCenter
+                                        }
+                                        Rectangle {
+                                            visible: modelData.icon === ""
+                                            width: 8
+                                            height: 8
+                                            radius: 4
+                                            color: tint
+                                            anchors.verticalCenter: parent.verticalCenter
+                                        }
+                                        Text { text: modelData.title; color: root.themeText; font.pixelSize: 9 }
+                                    }
+                                    Row {
+                                        spacing: 3
+                                        Text {
+                                            id: tileValue
+                                            text: modelData.key === "ping"
+                                                ? (result >= 0 ? String(Math.round(result)) : (active ? "…" : "—"))
+                                                : (result >= 0 ? root.formatSpeed(result) : (active ? root.formatSpeed(root.speedLiveMbps) : "—"))
+                                            color: root.themeText
+                                            font.pixelSize: 17
+                                            font.bold: true
+                                        }
+                                        Text {
+                                            text: modelData.key === "ping" ? "ms" : "Mbps"
+                                            color: root.themeText
+                                            font.pixelSize: 9
+                                            anchors.baseline: tileValue.baseline
+                                        }
+                                    }
+                                    Text {
+                                        text: modelData.key === "ping" && root.speedJitterMs >= 0 ? "jitter " + root.speedJitterMs.toFixed(1) + " ms" : ""
+                                        color: root.themeText
+                                        font.pixelSize: 8
+                                    }
+                                }
                             }
                         }
                     }
-                    Rectangle {
-                        Layout.fillWidth: true; Layout.preferredHeight: 58; radius: 10
-                        color: root.alpha(root.themeText, .035); border.width: 1; border.color: root.alpha(root.themeText, .08)
-                        RowLayout { anchors.fill: parent; anchors.leftMargin: 14; anchors.rightMargin: 14
-                            Text { text: "◉"; color: root.themeHighlight; font.pixelSize: 16 }
-                            ColumnLayout { Layout.fillWidth: true; spacing: 0
-                                Text { text: "Latency"; color: root.themeSecondary; font.pixelSize: 8 }
-                                Text { text: root.speedLatency; color: root.themeText; font.pixelSize: 16; font.bold: true }
-                            }
-                            Text { text: root.speedUpdated === "—" ? "" : root.speedUpdated; color: root.themeSecondary; font.pixelSize: 8 }
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        Text {
+                            text: root.speedServer !== "" ? "Server: Cloudflare " + root.speedServer : "Server: Cloudflare"
+                            color: root.themeSecondary
+                            font.pixelSize: 8
+                            Layout.fillWidth: true
                         }
+                        Text { text: "IPv4 · 4 streams"; color: root.themeSecondary; font.pixelSize: 8 }
                     }
-                    Item { Layout.fillHeight: true }
+
                     Controls.Button {
-                        text: root.speedLoading ? "Testing…" : "Run speed test"
+                        id: speedStartButton
+                        text: root.speedLoading ? "Testing…" : (root.speedPhase === "done" || root.speedPhase === "error" ? "Run again" : "Start test")
                         enabled: !root.speedLoading
-                        Layout.fillWidth: true; Layout.preferredHeight: 34
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: 34
                         onClicked: root.runSpeedTest()
+                        background: Rectangle {
+                            radius: 6
+                            color: speedStartButton.down ? root.alpha(root.themeHighlight, .20) : (speedStartButton.hovered ? root.alpha(root.themeHighlight, .12) : root.alpha(root.themeBackground, .92))
+                            border.width: 1
+                            border.color: speedStartButton.enabled ? "#ff3030" : root.alpha(root.themeText, .15)
+                        }
+                        contentItem: Text {
+                            text: speedStartButton.text
+                            color: speedStartButton.enabled ? root.themeText : root.themeSecondary
+                            font.pixelSize: 11
+                            font.bold: true
+                            horizontalAlignment: Text.AlignHCenter
+                            verticalAlignment: Text.AlignVCenter
+                        }
                     }
                 }
 
