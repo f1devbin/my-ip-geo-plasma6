@@ -1,7 +1,7 @@
 import QtQuick
 import QtQuick.Controls as Controls
 import QtQuick.Layouts
-import Qt.labs.settings
+import QtCore
 import org.kde.plasma.plasmoid
 import org.kde.kirigami as Kirigami
 import org.kde.plasma.core as PlasmaCore
@@ -26,7 +26,6 @@ PlasmoidItem {
     property bool loading: false
     property bool localLoading: false
     property bool networkLoading: false
-    property bool diagnosticsLoading: false
     property bool speedLoading: false
     property bool appTrafficLoading: false
     property var appTraffic: []
@@ -98,16 +97,19 @@ PlasmoidItem {
     property var dnsMap: ({})
 
     property string internetStatus: "—"
-    property string gatewayStatus: "—"
-    property string dnsStatus: "—"
-    property string ipv4Status: "—"
-    property string ipv6Status: "—"
-    property string latency: "—"
-    property string networkUpdated: "—"
     property string internetQuality: "unknown"
     property bool vpnActive: false
-    property int networkChecksDone: 0
-    property string diagnosticsText: ""
+    property int statusSeq: 0
+    // Diagnostics: parsed result per check, checks still running, run id and times
+    readonly property var diagChecks: ["link", "gateway", "dns", "internet", "web", "ipv6", "mtu", "route"]
+    property var diag: ({})
+    property var diagPending: ({})
+    property bool diagRunning: false
+    property int diagSeq: 0
+    property real diagStarted: 0
+    property real diagFinished: 0
+    property string diagUpdated: ""
+    readonly property var diagView: diagEvaluate(diag, diagPending, diagRunning)
     property string speedStatus: ""
     property string speedUpdated: ""
     property string speedPhase: ""
@@ -122,17 +124,105 @@ PlasmoidItem {
     property string trafficReceived: "—"
     property string trafficSent: "—"
     property string trafficUpdated: "—"
-    property string diagnosticsSummary: ""
 
     Settings {
         id: appSettings
         property string watchedDevicesJson: "[]"
-        // Former IP History storage (feature removed in 6.1.38); emptied on start
-        property string ipHistoryJson: ""
         property string appUsageJson: ""
     }
 
     Plasmoid.icon: "/icon.png"
+
+    // Status mark of the Diagnostics tab: filled circle with a check, "!" or a cross, a spinning arc while running
+    component DiagIcon: Item {
+        id: diagIcon
+        property string status: "pending"
+        property real size: 18
+        readonly property color tint: root.diagTint(status)
+        width: size
+        height: size
+        Canvas {
+            id: diagIconMark
+            anchors.fill: parent
+            visible: diagIcon.status !== "running"
+            antialiasing: true
+            onVisibleChanged: if (visible) requestPaint()
+            onPaint: {
+                var ctx = getContext("2d")
+                ctx.reset()
+                var s = width
+                var c = s / 2
+                if (diagIcon.status === "pending") {
+                    ctx.lineWidth = 1.5
+                    ctx.strokeStyle = root.cssColor(diagIcon.tint, 1)
+                    ctx.beginPath()
+                    ctx.arc(c, c, c - 1.5, 0, 2 * Math.PI, false)
+                    ctx.stroke()
+                    return
+                }
+                ctx.fillStyle = root.cssColor(diagIcon.tint, 1)
+                ctx.beginPath()
+                ctx.arc(c, c, c - 0.5, 0, 2 * Math.PI, false)
+                ctx.fill()
+                ctx.strokeStyle = "#10151d"
+                ctx.fillStyle = "#10151d"
+                ctx.lineWidth = Math.max(1.8, s * 0.12)
+                ctx.lineCap = "round"
+                ctx.lineJoin = "round"
+                ctx.beginPath()
+                if (diagIcon.status === "ok") {
+                    ctx.moveTo(s * 0.29, s * 0.53)
+                    ctx.lineTo(s * 0.44, s * 0.68)
+                    ctx.lineTo(s * 0.72, s * 0.37)
+                    ctx.stroke()
+                } else if (diagIcon.status === "fail") {
+                    ctx.moveTo(s * 0.35, s * 0.35)
+                    ctx.lineTo(s * 0.65, s * 0.65)
+                    ctx.moveTo(s * 0.65, s * 0.35)
+                    ctx.lineTo(s * 0.35, s * 0.65)
+                    ctx.stroke()
+                } else if (diagIcon.status === "warn") {
+                    ctx.moveTo(c, s * 0.27)
+                    ctx.lineTo(c, s * 0.56)
+                    ctx.stroke()
+                    ctx.beginPath()
+                    ctx.arc(c, s * 0.74, ctx.lineWidth * 0.6, 0, 2 * Math.PI, false)
+                    ctx.fill()
+                } else {
+                    ctx.moveTo(s * 0.32, c)
+                    ctx.lineTo(s * 0.68, c)
+                    ctx.stroke()
+                }
+            }
+        }
+        Canvas {
+            id: diagIconSpinner
+            anchors.fill: parent
+            visible: diagIcon.status === "running"
+            antialiasing: true
+            onVisibleChanged: if (visible) requestPaint()
+            onPaint: {
+                var ctx = getContext("2d")
+                ctx.reset()
+                var c = width / 2
+                ctx.lineWidth = Math.max(2, width * 0.13)
+                ctx.lineCap = "round"
+                ctx.strokeStyle = root.cssColor(diagIcon.tint, 1)
+                ctx.beginPath()
+                ctx.arc(c, c, c - ctx.lineWidth / 2 - 0.5, 0, 1.4 * Math.PI, false)
+                ctx.stroke()
+            }
+            RotationAnimation on rotation {
+                from: 0
+                to: 360
+                duration: 900
+                loops: Animation.Infinite
+                running: diagIconSpinner.visible
+            }
+        }
+        onStatusChanged: { diagIconMark.requestPaint(); diagIconSpinner.requestPaint() }
+        onTintChanged: { diagIconMark.requestPaint(); diagIconSpinner.requestPaint() }
+    }
 
     function formatUptime(seconds) {
         var s = Math.max(0, Math.floor(Number(seconds)))
@@ -238,7 +328,7 @@ PlasmoidItem {
     function checkDependencies() {
         if (dependenciesLoading) return
         dependenciesLoading = true
-        dependencyApi.connectSource("sh -c 'command -v curl >/dev/null 2>&1 || echo curl; command -v ip >/dev/null 2>&1 || echo iproute2; command -v ping >/dev/null 2>&1 || echo iputils-ping; command -v resolvectl >/dev/null 2>&1 || echo systemd-resolved; command -v notify-send >/dev/null 2>&1 || echo libnotify-bin'")
+        dependencyApi.connectSource("sh -c 'command -v curl >/dev/null 2>&1 || echo curl; command -v ip >/dev/null 2>&1 || echo iproute2; command -v ping >/dev/null 2>&1 || echo iputils-ping'")
     }
 
     function ipToInt(ip) {
@@ -392,34 +482,632 @@ PlasmoidItem {
             localLoading = true
             localApi.connectSource("ip -j addr show")
             routeApi.connectSource("ip -j route show default")
-            dnsApi.connectSource("resolvectl --no-pager dns")
+            dnsApi.connectSource("bash " + codePath("netdiag.sh") + " dnsmap " + Date.now())
         }
         refreshNetwork()
     }
 
+    // Header indicators (internet dot, VPN shield): one light check every 30 s
     function refreshNetwork() {
         if (networkLoading) return
         networkLoading = true
-        networkChecksDone = 0
-        gatewayCheckApi.connectSource("sh -c 'gw=$(ip route show default | awk '\''/default/ {print $3; exit}'\''); if [ -n \"$gw\" ]; then ping -4 -c 1 -W 1 \"$gw\" >/dev/null 2>&1 && echo OK || echo FAIL; else echo NONE; fi'")
-        dnsCheckApi.connectSource("getent hosts example.com >/dev/null 2>&1 && echo OK || echo FAIL")
-        internetCheckApi.connectSource("sh -c 'nm_conn=$(nmcli -t -f CONNECTIVITY networking connectivity check 2>/dev/null | head -n 1); has_route=0; ip -4 route show default 2>/dev/null | grep -q . && has_route=1; ip -6 route show default 2>/dev/null | grep -q . && has_route=1; if [ \"$has_route\" -eq 0 ] && [ \"$nm_conn\" != \"full\" ]; then echo OFFLINE; exit; fi; t=\"\"; for url in \"https://www.google.com/generate_204\" \"https://www.gstatic.com/generate_204\" \"https://www.msftconnecttest.com/connecttest.txt\" \"https://www.cloudflare.com/cdn-cgi/trace\"; do x=$(curl -fsS --connect-timeout 3 --max-time 5 -o /dev/null -w \"%{time_total}\" \"$url\" 2>/dev/null); if [ -n \"$x\" ]; then t=\"$x\"; break; fi; done; if [ -z \"$t\" ] && [ \"$nm_conn\" != \"full\" ]; then echo OFFLINE; exit; fi; vpn=0; if command -v nmcli >/dev/null 2>&1; then while IFS=: read -r dev type; do case \"$type\" in vpn|ovpn|wireguard|tun|tap|ppp|ipsec|l2tp) if [ -n \"$dev\" ] && [ \"$(cat /sys/class/net/$dev/operstate 2>/dev/null)\" = \"up\" ] && ip -br addr show dev \"$dev\" 2>/dev/null | grep -Eq \"[[:space:]][0-9A-Fa-f:.]+/[0-9]+\"; then vpn=1; break; fi ;; esac; done <<EOF\n$(nmcli -t -f DEVICE,TYPE device status 2>/dev/null)\nEOF\nfi; if [ \"$vpn\" -eq 1 ]; then echo \"VPN $t\"; else echo \"ONLINE $t\"; fi'")
-        ipv4CheckApi.connectSource("ip -4 route get 1.1.1.1 >/dev/null 2>&1 && echo OK || echo FAIL")
-        ipv6CheckApi.connectSource("sh -c 'curl -6 -fsS --max-time 5 -o /dev/null https://www.cloudflare.com && echo OK || echo FAIL'")
+        root.statusSeq += 1
+        statusApi.connectSource("bash " + codePath("netdiag.sh") + " status " + root.statusSeq)
     }
 
-    function networkCheckDone() {
-        networkChecksDone += 1
-        if (networkChecksDone >= 5) {
-            networkLoading = false
-            networkUpdated = Qt.formatTime(new Date(), "HH:mm:ss")
+    // ---------- Diagnostics ----------
+    // Every check is a separate process, so results show up one by one. A run id keeps the
+    // command strings unique and drops late answers of an older run.
+    function runDiagnostics() {
+        if (root.diagRunning) return
+        root.diagSeq += 1
+        root.diagRunning = true
+        root.diagStarted = Date.now()
+        var pending = {}
+        for (var i = 0; i < root.diagChecks.length; ++i) pending[root.diagChecks[i]] = true
+        root.diagPending = pending
+        root.diag = ({})
+        for (var j = 0; j < root.diagChecks.length; ++j)
+            diagApi.connectSource("bash " + codePath("netdiag.sh") + " " + root.diagChecks[j] + " " + root.diagSeq)
+        diagWatchdog.restart()
+        root.refreshNetwork()
+    }
+
+    // Opening the tab shows fresh results: a run starts when there is none or it is older than 5 minutes
+    function autoRunDiagnostics() {
+        if (!featurePanel.visible || root.toolsTab !== 1 || root.diagRunning) return
+        if (root.diagFinished === 0 || Date.now() - root.diagFinished > 300000) root.runDiagnostics()
+    }
+
+    function diagResult(check, text) {
+        var next = {}
+        for (var k in root.diag) if (root.diag.hasOwnProperty(k)) next[k] = root.diag[k]
+        next[check] = root.parseDiag(check, text)
+        root.diag = next
+        var pending = {}
+        var left = 0
+        for (var p in root.diagPending)
+            if (root.diagPending.hasOwnProperty(p) && p !== check && root.diagPending[p] === true) { pending[p] = true; left++ }
+        root.diagPending = pending
+        if (left === 0) root.finishDiagnostics()
+    }
+
+    function finishDiagnostics() {
+        diagWatchdog.stop()
+        root.diagPending = ({})
+        root.diagRunning = false
+        root.diagFinished = Date.now()
+        root.diagUpdated = Qt.formatTime(new Date(), "HH:mm:ss")
+    }
+
+    function parseDiag(check, text) {
+        var t = String(text || "")
+        if (check === "link") return root.parseDiagLink(t)
+        if (check === "gateway") return root.parseDiagGateway(t)
+        if (check === "dns") return root.parseDiagDns(t)
+        if (check === "internet") return root.parseDiagInternet(t)
+        if (check === "web") return root.parseDiagWeb(t)
+        if (check === "ipv6") return root.parseDiagIpv6(t)
+        if (check === "mtu") return root.parseDiagMtu(t)
+        if (check === "route") return root.parseDiagRoute(t)
+        return null
+    }
+
+    // ping output -> packets, loss, round trip (ms) and jitter (mean difference of consecutive replies)
+    function parsePing(text) {
+        var out = String(text || "")
+        var r = {sent: 0, recv: 0, loss: 100, errors: 0, min: -1, avg: -1, max: -1, jitter: -1, times: [], error: "", from: ""}
+        var sum = out.match(/(\d+) packets transmitted, (\d+) received((?:, \+\d+ \w+)*), ([\d.]+)% packet loss/)
+        if (sum) {
+            r.sent = +sum[1]
+            r.recv = +sum[2]
+            r.loss = parseFloat(sum[4])
+            var e = sum[3].match(/\+(\d+) errors/)
+            if (e) r.errors = +e[1]
+        }
+        var rtt = out.match(/= ([\d.]+)\/([\d.]+)\/([\d.]+)\/[\d.]+ ms/)
+        if (rtt) { r.min = parseFloat(rtt[1]); r.avg = parseFloat(rtt[2]); r.max = parseFloat(rtt[3]) }
+        var re = /bytes from [^:]+: .*?time=([\d.]+) ms/g
+        var m
+        while ((m = re.exec(out)) !== null) r.times.push(parseFloat(m[1]))
+        if (r.times.length > 1) {
+            var j = 0
+            for (var i = 1; i < r.times.length; ++i) j += Math.abs(r.times[i] - r.times[i - 1])
+            r.jitter = j / (r.times.length - 1)
+        } else if (r.times.length === 1) r.jitter = 0
+        var err = out.match(/^ping: (.+)$/m)
+        if (err) r.error = err[1].replace(/^connect: /, "")
+        var from = out.match(/^From (\S+) icmp_seq=\d+ (.+)$/m)
+        if (from) r.from = from[1] + ": " + from[2]
+        return r
+    }
+
+    // "default via 10.0.0.1 dev wlp2s0 proto dhcp src 10.0.0.5 metric 600" -> {dev, via, src, metric}
+    function parseRouteLine(line) {
+        var f = String(line || "").trim().split(/\s+/)
+        var r = {dev: "", via: "", src: "", metric: 0}
+        for (var i = 0; i < f.length - 1; ++i) {
+            if (f[i] === "dev") r.dev = f[i + 1]
+            else if (f[i] === "via") r.via = f[i + 1]
+            else if (f[i] === "src") r.src = f[i + 1]
+            else if (f[i] === "metric") r.metric = +f[i + 1] || 0
+        }
+        return r
+    }
+
+    // nmcli -t output: fields split by ":", a ":" inside a value is written as "\:"
+    function splitTerse(line) {
+        var parts = []
+        var cur = ""
+        var s = String(line || "")
+        for (var i = 0; i < s.length; ++i) {
+            var c = s.charAt(i)
+            if (c === "\\" && i + 1 < s.length) { cur += s.charAt(++i); continue }
+            if (c === ":") { parts.push(cur); cur = ""; continue }
+            cur += c
+        }
+        parts.push(cur)
+        return parts
+    }
+
+    // NetworkManager's scale: -40 dBm and better = 100 %, -100 dBm = 0 %
+    function wifiQuality(dbm) {
+        var v = Math.min(-40, Math.max(-100, dbm))
+        return Math.round(100 - (Math.abs(v + 40) * 100) / 60)
+    }
+
+    function parseDiagLink(text) {
+        var r = {routes4: [], routes6: [], egress: null, ifaces: {}, order: [], vpns: [], nm: ""}
+        function iface(dev) {
+            if (!r.ifaces[dev]) {
+                r.ifaces[dev] = {dev: dev, kind: "other", devtype: "", mtu: 0, speed: -1, duplex: "", mac: "", addrs: [], addrs6: [], wifi: null}
+                r.order.push(dev)
+            }
+            return r.ifaces[dev]
+        }
+        function wifi(dev) {
+            var it = iface(dev)
+            if (!it.wifi) it.wifi = {ssid: "", freq: 0, dbm: null, signal: -1, rate: 0, chan: ""}
+            return it.wifi
+        }
+        var lines = String(text || "").split("\n")
+        for (var i = 0; i < lines.length; ++i) {
+            var line = lines[i]
+            var m
+            if ((m = line.match(/^ROUTE4 (.+)$/))) r.routes4.push(root.parseRouteLine(m[1]))
+            else if ((m = line.match(/^ROUTE6 (.+)$/))) r.routes6.push(root.parseRouteLine(m[1]))
+            else if ((m = line.match(/^EGRESS (.+)$/))) r.egress = root.parseRouteLine(m[1])
+            else if ((m = line.match(/^IFACE (\S+) (.*)$/))) {
+                var it = iface(m[1])
+                var kv = m[2].split(/\s+/)
+                for (var k = 0; k < kv.length; ++k) {
+                    var eq = kv[k].indexOf("=")
+                    if (eq < 0) continue
+                    var key = kv[k].substring(0, eq), val = kv[k].substring(eq + 1)
+                    if (key === "kind") it.kind = val
+                    else if (key === "devtype") it.devtype = val === "-" ? "" : val
+                    else if (key === "mtu") it.mtu = +val || 0
+                    else if (key === "speed") it.speed = val !== "" && !isNaN(+val) ? +val : -1
+                    else if (key === "duplex") it.duplex = val
+                    else if (key === "mac") it.mac = val
+                }
+            } else if ((m = line.match(/^ADDR (\S+) (inet6?) (\S+)/))) {
+                if (m[2] === "inet") iface(m[1]).addrs.push(m[3])
+                else if (!/^fe80/i.test(m[3])) iface(m[1]).addrs6.push(m[3])
+            } else if ((m = line.match(/^IW (\S+)\s+(.*)$/))) {
+                var w = wifi(m[1])
+                var v = m[2].trim()
+                var x
+                if ((x = v.match(/^SSID: (.*)$/))) w.ssid = x[1]
+                else if ((x = v.match(/^freq: ([\d.]+)/))) w.freq = Math.round(parseFloat(x[1]))
+                else if ((x = v.match(/^signal: (-?\d+)/))) w.dbm = +x[1]
+                else if ((x = v.match(/^tx bitrate: ([\d.]+)/))) w.rate = parseFloat(x[1])
+            } else if ((m = line.match(/^NMWIFI (\S+) (.*)$/))) {
+                // IN-USE:SSID:CHAN:FREQ:RATE:SIGNAL
+                var f = root.splitTerse(m[2])
+                var nw = wifi(m[1])
+                if (!nw.ssid && f[1]) nw.ssid = f[1]
+                if (f[2]) nw.chan = f[2]
+                if (!nw.freq && f[3]) nw.freq = parseInt(f[3]) || 0
+                if (!nw.rate && f[4]) nw.rate = parseFloat(f[4]) || 0
+                if (f[5] !== undefined && f[5] !== "") nw.signal = parseInt(f[5])
+            } else if ((m = line.match(/^PROCWL (\S+): \S+\s+[\d.]+\s+(-?\d+)/))) {
+                var pw = wifi(m[1])
+                if (pw.dbm === null) pw.dbm = +m[2]
+            } else if ((m = line.match(/^VPN (\S+) (\S+)/))) r.vpns.push({dev: m[1], kind: m[2]})
+            else if ((m = line.match(/^NMCONN (\S+)/))) r.nm = m[1]
+        }
+        return r
+    }
+
+    function parseDiagGateway(text) {
+        var t = String(text || "")
+        if (/^NOGW\s*$/m.test(t)) return {none: true}
+        var gw = t.match(/^GW (\S+) ?(\S*)/m)
+        var a = t.indexOf("__PING__"), b = t.indexOf("__NEIGH__")
+        var neigh = b >= 0 ? t.substring(b).match(/\n(\S+) dev \S+(?: lladdr ([0-9a-fA-F:]+))?.*?\s([A-Z]+)\s*$/m) : null
+        return {
+            none: false,
+            gw: gw ? gw[1] : "",
+            dev: gw ? gw[2] : "",
+            ping: root.parsePing(a >= 0 ? t.substring(a, b >= 0 ? b : t.length) : ""),
+            neigh: neigh ? neigh[3] : "",
+            mac: neigh && neigh[2] ? neigh[2].toUpperCase() : ""
         }
     }
 
-    function runDiagnostics() {
-        if (diagnosticsLoading) return
-        diagnosticsLoading = true
-        diagnosticsApi.connectSource("sh -c 'iface=$(ip route show default | sed -n \"1s/.*dev \\([^ ]*\\).*/\\1/p\"); gw=$(ip route show default | sed -n \"1s/default via \\([^ ]*\\).*/\\1/p\"); echo Interface: ${iface:-NONE}; echo Gateway: ${gw:-NONE}; if getent hosts example.com >/dev/null 2>&1; then echo DNS: OK; else echo DNS: FAIL; fi; if curl -4 -fsS --max-time 5 -o /dev/null https://www.google.com/generate_204 >/dev/null 2>&1; then echo Internet: OK; else echo Internet: FAIL; fi; if ip -4 route get 1.1.1.1 >/dev/null 2>&1; then echo IPv4: OK; else echo IPv4: FAIL; fi; if curl -6 -fsS --max-time 5 -o /dev/null https://www.google.com >/dev/null 2>&1; then echo IPv6: OK; else echo IPv6: UNAVAILABLE; fi; vpn=INACTIVE; for dev in $(ip -o link show | cut -d: -f2 | cut -d@ -f1); do case \"$dev\" in tun*|tap*|ppp*|wg*|warp*) if [ \"$(cat /sys/class/net/$dev/operstate 2>/dev/null)\" = \"up\" ] && ip -br addr show dev \"$dev\" 2>/dev/null | grep -Eq \"[[:space:]][0-9A-Fa-f:.]+/[0-9]+\"; then vpn=ACTIVE; break; fi ;; esac; done; echo VPN: $vpn; curl -4 -fsS --max-time 5 -o /dev/null -w \"Latency: %{time_total}s\n\" https://www.google.com/generate_204 2>/dev/null || echo Latency: UNAVAILABLE;'")
+    function parseDiagDns(text) {
+        var r = {links: {}, global: [], stub: false, lookup: null, nx: null, doh: ""}
+        var lines = String(text || "").split("\n")
+        for (var i = 0; i < lines.length; ++i) {
+            var m
+            if ((m = lines[i].match(/^SERVERS Link \d+ \(([^)]+)\):\s*(.*)$/))) r.links[m[1]] = m[2].trim() ? m[2].trim().split(/\s+/) : []
+            else if ((m = lines[i].match(/^SERVERS Global:\s*(.*)$/))) r.global = m[1].trim() ? m[1].trim().split(/\s+/) : []
+            else if (/^STUB/.test(lines[i])) r.stub = true
+            else if ((m = lines[i].match(/^(LOOKUP|NXLOOKUP) rc=(\d+) ms=(\d+) addr=(\S*)/))) {
+                var res = {rc: +m[2], ms: +m[3], addr: m[4]}
+                if (m[1] === "LOOKUP") r.lookup = res
+                else r.nx = res
+            } else if ((m = lines[i].match(/^DOH (\S+)/))) r.doh = m[1]
+        }
+        return r
+    }
+
+    function parseDiagInternet(text) {
+        var t = String(text || "")
+        var r = {targets: [], tcp: null}
+        var parts = t.split(/^__PING__ /m)
+        for (var i = 1; i < parts.length; ++i) {
+            var nl = parts[i].indexOf("\n")
+            var ip = (nl >= 0 ? parts[i].substring(0, nl) : parts[i]).trim()
+            r.targets.push({ip: ip, ping: root.parsePing(nl >= 0 ? parts[i].substring(nl + 1) : "")})
+        }
+        var tcp = t.match(/^TCP ([\d.]+) (\d+)/m)
+        if (tcp) r.tcp = {connect: parseFloat(tcp[1]), code: +tcp[2]}
+        return r
+    }
+
+    function parseDiagWeb(text) {
+        var t = String(text || "")
+        var r = {rc: -1, code: 0, dns: 0, connect: 0, tls: 0, ttfb: 0, total: 0, ip: "", portal: 0, portalTo: "", err: "", trace: {}, ntp: ""}
+        var m
+        if ((m = t.match(/^WEBRC (\d+)/m))) r.rc = +m[1]
+        if ((m = t.match(/^WEB (\d+) ([\d.]+) ([\d.]+) ([\d.]+) ([\d.]+) ([\d.]+) ?(\S*)/m))) {
+            r.code = +m[1]; r.dns = parseFloat(m[2]); r.connect = parseFloat(m[3]); r.tls = parseFloat(m[4])
+            r.ttfb = parseFloat(m[5]); r.total = parseFloat(m[6]); r.ip = m[7]
+        }
+        if ((m = t.match(/^PORTAL (\d+) ?(\S*)/m))) { r.portal = +m[1]; r.portalTo = m[2] }
+        if ((m = t.match(/^WEBERR (?:curl: \(\d+\) )?(.+)$/m))) r.err = m[1].trim()
+        var re = /^TRACE (\w+)=(.*)$/gm
+        while ((m = re.exec(t)) !== null) r.trace[m[1]] = m[2].trim()
+        if ((m = t.match(/^NTP (\S+)/m))) r.ntp = m[1]
+        return r
+    }
+
+    function parseDiagIpv6(text) {
+        var t = String(text || "")
+        var r = {addrs: [], routes: 0, ping: null, pub: ""}
+        var re = /^ADDR6 (\S+)/gm
+        var m
+        while ((m = re.exec(t)) !== null) r.addrs.push(m[1])
+        r.routes = (t.match(/^ROUTE6 /gm) || []).length
+        var a = t.indexOf("__PING__")
+        if (a >= 0) r.ping = root.parsePing(t.substring(a))
+        if ((m = t.match(/^PUBLIC6 (\S+)/m))) r.pub = m[1]
+        return r
+    }
+
+    // Path MTU: the MTU a router reported, else 1500 when a full-size packet passes,
+    // else the largest packet that got an answer (a lower bound), -1 when ping gets no answer at all
+    function parseDiagMtu(text) {
+        var t = String(text || "")
+        var r = {dev: "", devMtu: 0, pmtu: -1, exact: false}
+        var m
+        if ((m = t.match(/^DEVMTU (\S+) (\d+)/m))) { r.dev = m[1]; r.devMtu = +m[2] }
+        var a = t.indexOf("__PMTU__"), b = t.indexOf("__SIZES__")
+        var probe = a >= 0 ? t.substring(a, b >= 0 ? b : t.length) : ""
+        var best = 0
+        var re = /^OK (\d+)/gm
+        while ((m = re.exec(t)) !== null) best = Math.max(best, +m[1])
+        var told = probe.match(/mtu ?= ?(\d+)/)
+        if (told) { r.pmtu = +told[1]; r.exact = true }
+        else if (/ bytes from /.test(probe) || best >= 1472) { r.pmtu = 1500; r.exact = true }
+        else if (best > 0) r.pmtu = best + 28
+        return r
+    }
+
+    function parseDiagRoute(text) {
+        var hops = []
+        var rtt = {}
+        var names = {}
+        var lines = String(text || "").split("\n")
+        for (var i = 0; i < lines.length; ++i) {
+            var m
+            if ((m = lines[i].match(/^HOP (\d+) (\S+) (\S+) ([012])/))) hops.push({ttl: +m[1], ip: m[2], rtt: m[3] === "-" ? -1 : parseFloat(m[3]), reached: +m[4], name: ""})
+            else if ((m = lines[i].match(/^RTT (\S+) ([\d.]+)/))) rtt[m[1]] = parseFloat(m[2])
+            else if ((m = lines[i].match(/^NAME (\S+) (\S+)/))) names[m[1]] = m[2]
+        }
+        hops.sort(function(a, b) { return a.ttl - b.ttl })
+        // Trailing hops without an answer are shown as one "*" row
+        var last = -1
+        for (var j = 0; j < hops.length; ++j) if (hops[j].ip !== "*") last = j
+        var out = hops.slice(0, last + 1)
+        if (last + 1 < hops.length) out.push(hops[last + 1])
+        for (var k = 0; k < out.length; ++k) {
+            if (out[k].rtt < 0 && rtt[out[k].ip] !== undefined) out[k].rtt = rtt[out[k].ip]
+            out[k].name = names[out[k].ip] || ""
+        }
+        return out
+    }
+
+    function fmtMs(ms) {
+        if (!(ms >= 0)) return "—"
+        if (ms < 1) return "<1 ms"
+        if (ms < 10) return ms.toFixed(1) + " ms"
+        return Math.round(ms) + " ms"
+    }
+
+    function diagTint(status) {
+        if (status === "ok") return "#35d07f"
+        if (status === "warn") return "#e0a030"
+        if (status === "fail") return "#ff4040"
+        if (status === "running") return root.themeHighlight
+        return root.alpha(root.themeText, 0.55)
+    }
+
+    // The adapter of the connection: first default route that is not a VPN tunnel
+    function diagMainIface(link) {
+        var routes = link.routes4.concat(link.routes6)
+        var fallback = null
+        for (var i = 0; i < routes.length; ++i) {
+            var it = link.ifaces[routes[i].dev]
+            if (!it) continue
+            if (!fallback) fallback = it
+            if (it.kind !== "vpn") return it
+        }
+        return fallback
+    }
+
+    function diagVpnName(v) {
+        if (v.dev === "CloudflareWARP") return "Cloudflare WARP"
+        if (/^tailscale/.test(v.dev)) return "Tailscale"
+        if (v.dev === "nordlynx") return "NordVPN"
+        if (/^proton/.test(v.dev)) return "Proton VPN"
+        if (v.kind === "wireguard") return "WireGuard · " + v.dev
+        if (v.kind === "ppp") return "PPP · " + v.dev
+        return "VPN · " + v.dev
+    }
+
+    // Results -> the five steps, the detail tiles, the route and the overall verdict
+    function diagEvaluate(d, pending, running) {
+        d = d || {}
+        pending = pending || {}
+        function busy(k) { return pending[k] === true }
+        function step(key, title) {
+            return {key: key, title: title, status: busy(key) ? "running" : "pending", value: busy(key) ? "…" : "", detail: ""}
+        }
+        var L = d.link, G = d.gateway, N = d.dns, I = d.internet, W = d.web, V6 = d.ipv6, M = d.mtu
+        var main = L ? root.diagMainIface(L) : null
+        var ip4 = main && main.addrs.length ? main.addrs[0] : ""
+
+        // Internet first: other steps use it ("router ignores ping" when the internet still works)
+        var s4 = step("internet", "Internet")
+        var net = {ok: false, avg: -1, jitter: -1, loss: -1, target: ""}
+        var webOk = !!(W && W.rc === 0 && W.code >= 200 && W.code < 400)
+        var portal = !!(W && W.portal > 0 && W.portal !== 204)
+        if (I) {
+            var best = null, sent = 0, recv = 0
+            for (var t = 0; t < I.targets.length; ++t) {
+                var pg = I.targets[t].ping
+                sent += pg.sent
+                recv += pg.recv
+                if (pg.recv > 0 && (!best || pg.recv > best.ping.recv || (pg.recv === best.ping.recv && pg.avg < best.ping.avg))) best = I.targets[t]
+            }
+            if (best) {
+                net = {ok: true, avg: best.ping.avg, jitter: best.ping.jitter, loss: sent > 0 ? Math.round((sent - recv) * 100 / sent) : 0, target: best.ip}
+                s4.status = net.loss >= 5 || net.avg >= 150 || net.jitter >= 30 ? "warn" : "ok"
+                s4.value = root.fmtMs(net.avg)
+                s4.detail = best.ip + " · jitter " + root.fmtMs(net.jitter) + " · " + net.loss + "% loss"
+            } else if (I.tcp && I.tcp.connect > 0 && !(portal && !webOk)) {
+                net.ok = true
+                s4.status = "ok"
+                s4.value = root.fmtMs(I.tcp.connect * 1000)
+                s4.detail = "Ping is blocked on this network · TCP to 1.1.1.1 works"
+            } else if (portal && !webOk) {
+                // Behind a sign-in page only the portal answers, a TCP connection proves nothing
+                s4.status = "warn"
+                s4.value = "Blocked"
+                s4.detail = "Traffic is held by the sign-in page"
+            } else if (webOk) {
+                net.ok = true
+                s4.status = "ok"
+                s4.value = "OK"
+                s4.detail = "Ping is blocked on this network · websites work"
+            } else {
+                s4.status = "fail"
+                s4.value = "No reply"
+                var why = I.targets.length ? (I.targets[0].ping.from || I.targets[0].ping.error) : ""
+                s4.detail = "1.1.1.1 and 8.8.8.8 do not answer" + (why ? " · " + why : "")
+            }
+        }
+
+        var s1 = step("link", "Connection")
+        var wifiWeak = null
+        if (L) {
+            if (!L.routes4.length && !L.routes6.length) {
+                s1.status = "fail"
+                s1.value = "Offline"
+                s1.detail = "No network connection (no default route)"
+            } else if (main) {
+                var parts = []
+                s1.status = "ok"
+                if (main.kind === "wifi") {
+                    var w = main.wifi || {ssid: "", freq: 0, dbm: null, signal: -1, rate: 0, chan: ""}
+                    var q = w.dbm !== null ? root.wifiQuality(w.dbm) : w.signal
+                    s1.value = "Wi-Fi" + (q >= 0 ? " " + q + "%" : "")
+                    if (w.ssid) parts.push("“" + w.ssid + "”")
+                    if (w.freq > 0) parts.push(w.freq >= 5925 ? "6 GHz" : (w.freq >= 4900 ? "5 GHz" : "2.4 GHz"))
+                    if (w.dbm !== null) parts.push(w.dbm + " dBm")
+                    if (w.rate > 0) parts.push(Math.round(w.rate) + " Mbit/s")
+                    if ((w.dbm !== null && w.dbm <= -76) || (w.dbm === null && q >= 0 && q < 40)) {
+                        s1.status = "warn"
+                        wifiWeak = {dbm: w.dbm, q: q}
+                    }
+                } else if (main.kind === "ethernet") {
+                    s1.value = "Ethernet" + (main.speed > 0 ? " " + (main.speed >= 1000 ? (main.speed / 1000) + " Gbit/s" : main.speed + " Mbit/s") : "")
+                    if (main.duplex === "half") { parts.push("half duplex"); s1.status = "warn" }
+                } else if (main.kind === "mobile") s1.value = "Mobile"
+                else if (main.kind === "vpn") s1.value = "VPN tunnel"
+                else s1.value = "Connected"
+                parts.push(main.dev + (ip4 ? " " + ip4 : ""))
+                if (L.nm === "portal") { parts.push("sign-in required"); s1.status = "warn" }
+                s1.detail = parts.join(" · ")
+            } else {
+                s1.status = "ok"
+                s1.value = "Connected"
+                s1.detail = L.routes4.length ? L.routes4[0].dev : L.routes6[0].dev
+            }
+        }
+
+        var s2 = step("gateway", "Router")
+        if (G) {
+            if (G.none) {
+                s2.status = "info"
+                s2.value = "—"
+                s2.detail = L && !L.routes4.length && !L.routes6.length ? "No default gateway" : "Point-to-point link: no router to check"
+            } else if (G.ping.recv > 0) {
+                s2.status = G.ping.loss >= 20 || G.ping.avg >= 100 ? "warn" : "ok"
+                s2.value = root.fmtMs(G.ping.avg)
+                s2.detail = G.gw + " · " + Math.round(G.ping.loss) + "% loss"
+            } else if (G.neigh === "REACHABLE" || net.ok || webOk) {
+                s2.status = "ok"
+                s2.value = "OK"
+                s2.detail = G.gw + " · does not answer ping, but is reachable"
+            } else {
+                s2.status = "fail"
+                s2.value = "No reply"
+                s2.detail = G.gw + " does not respond"
+            }
+        }
+
+        var s3 = step("dns", "DNS")
+        var dnsFail = false, dnsWarn = ""
+        if (N) {
+            var servers = []
+            var devs = main ? [main.dev] : []
+            for (var dv in N.links) if (N.links.hasOwnProperty(dv) && devs.indexOf(dv) === -1 && N.links[dv].length) devs.push(dv)
+            for (var di = 0; di < devs.length; ++di) {
+                var list = N.links[devs[di]] || []
+                for (var li = 0; li < list.length; ++li) if (servers.indexOf(list[li]) === -1) servers.push(list[li])
+            }
+            for (var gi = 0; gi < N.global.length; ++gi) if (servers.indexOf(N.global[gi]) === -1) servers.push(N.global[gi])
+            var srv = servers.length ? servers.slice(0, 3).join(", ") + (servers.length > 3 ? " …" : "") : ""
+            if (N.lookup && N.lookup.rc === 0) {
+                var ms = N.nx && (N.nx.rc === 0 || N.nx.rc === 2) ? N.nx.ms : N.lookup.ms
+                s3.status = "ok"
+                s3.value = root.fmtMs(ms)
+                s3.detail = srv ? "Servers: " + srv : "Names are resolved"
+                if (N.nx && N.nx.rc === 0 && N.nx.addr) {
+                    s3.status = "warn"
+                    dnsWarn = "hijack"
+                    s3.detail = "Answers for names that do not exist" + (srv ? " · " + srv : "")
+                } else if (ms >= 500) {
+                    s3.status = "warn"
+                    dnsWarn = "slow"
+                    s3.detail = "Slow lookups" + (srv ? " · " + srv : "")
+                }
+            } else {
+                dnsFail = true
+                var rc = N.lookup ? N.lookup.rc : -1
+                s3.status = "fail"
+                s3.value = rc === 124 ? "No answer" : "Failed"
+                s3.detail = (rc === 124 ? "DNS server does not answer" : (rc === 2 ? "Names are not found" : "Lookup failed")) + (srv ? " · " + srv : "")
+                if (N.doh === "ok") s3.detail += " · 1.1.1.1 works"
+            }
+        }
+
+        var s5 = step("web", "Websites")
+        if (W) {
+            if (webOk) {
+                s5.status = W.total > 3 ? "warn" : "ok"
+                s5.value = root.fmtMs(W.total * 1000)
+                s5.detail = "HTTPS · DNS " + Math.round(W.dns * 1000) + " · connect " + Math.round(Math.max(0, W.connect - W.dns) * 1000)
+                    + " · TLS " + Math.round(Math.max(0, W.tls - W.connect) * 1000) + " · reply " + Math.round(Math.max(0, W.ttfb - W.tls) * 1000) + " ms"
+            } else {
+                s5.status = "fail"
+                s5.value = portal ? "Sign-in" : "Failed"
+                s5.detail = portal ? "The network shows a sign-in page" : (W.err ? W.err.replace(/ after \d+ ms/, "") : "HTTP " + W.code)
+            }
+        }
+
+        // Detail tiles
+        var tiles = []
+        var tIp = {key: "web", title: "Public IP", status: busy("web") ? "running" : "pending", value: busy("web") ? "…" : "—", detail: ""}
+        if (W) {
+            if (webOk && W.trace.ip) {
+                tIp.status = "info"
+                tIp.value = W.trace.ip
+                var ipd = []
+                if (W.trace.loc) ipd.push(W.trace.loc)
+                if (W.trace.colo) ipd.push("Cloudflare " + W.trace.colo)
+                if (W.trace.warp === "on" || W.trace.warp === "plus") ipd.push("WARP " + W.trace.warp)
+                tIp.detail = ipd.join(" · ")
+            } else {
+                tIp.status = "info"
+                tIp.detail = "Unavailable"
+            }
+        }
+        tiles.push(tIp)
+
+        var t6 = {key: "ipv6", title: "IPv6", status: busy("ipv6") ? "running" : "pending", value: busy("ipv6") ? "…" : "—", detail: ""}
+        var v6Broken = false
+        if (V6) {
+            if (!V6.addrs.length) { t6.status = "info"; t6.value = "Not provided"; t6.detail = "No IPv6 address from the network" }
+            else if (!V6.routes) { t6.status = "info"; t6.value = "No route"; t6.detail = V6.addrs[0] }
+            else if (V6.ping && V6.ping.recv > 0) { t6.status = "ok"; t6.value = "Works · " + root.fmtMs(V6.ping.avg); t6.detail = V6.pub || V6.addrs[0] }
+            else if (V6.pub) { t6.status = "ok"; t6.value = "Works"; t6.detail = V6.pub }
+            else { t6.status = "warn"; t6.value = "No connection"; t6.detail = "Address set, IPv6 traffic fails"; v6Broken = true }
+        }
+        tiles.push(t6)
+
+        var tv = {key: "link", title: "VPN", status: busy("link") ? "running" : "pending", value: busy("link") ? "…" : "—", detail: ""}
+        if (L) {
+            if (!L.vpns.length) { tv.status = "info"; tv.value = "Off"; tv.detail = "No VPN connection" }
+            else {
+                var viaVpn = false
+                for (var vi = 0; vi < L.vpns.length; ++vi) if (L.egress && L.egress.dev === L.vpns[vi].dev) viaVpn = true
+                tv.status = "ok"
+                tv.value = root.diagVpnName(L.vpns[0]) + (L.vpns.length > 1 ? " +" + (L.vpns.length - 1) : "")
+                tv.detail = viaVpn ? "Internet traffic goes through the VPN" : "Internet traffic goes around the VPN"
+            }
+        }
+        tiles.push(tv)
+
+        var tm = {key: "mtu", title: "Path MTU", status: busy("mtu") ? "running" : "pending", value: busy("mtu") ? "…" : "—", detail: ""}
+        var mtuSmall = false
+        if (M) {
+            if (M.pmtu > 0) {
+                tm.status = M.pmtu < 1280 ? "warn" : "info"
+                mtuSmall = M.pmtu < 1280
+                tm.value = (M.exact ? "" : "≥ ") + M.pmtu + " bytes"
+                tm.detail = M.dev ? M.dev + " MTU " + M.devMtu : ""
+            } else {
+                tm.status = "info"
+                tm.detail = "Unknown: ping gets no answer"
+            }
+        }
+        tiles.push(tm)
+
+        // Verdict: the first broken link of the chain, else the most important warning
+        var verdict
+        var done = 0
+        for (var c = 0; c < root.diagChecks.length; ++c) if (d[root.diagChecks[c]]) done++
+        var anyResult = done > 0
+        if (running) {
+            verdict = {status: "running", title: "Checking the connection…", hint: done + " of " + root.diagChecks.length + " checks done"}
+        } else if (!anyResult) {
+            verdict = {status: "pending", title: "Not checked yet", hint: "Checks the adapter, router, DNS, internet and websites in about 5 seconds."}
+        } else if (s1.status === "fail") {
+            verdict = {status: "fail", title: "No network connection", hint: "Connect to Wi-Fi or plug in the network cable."}
+        } else if (s2.status === "fail" && !net.ok) {
+            verdict = {status: "fail", title: "Router does not respond", hint: "The router" + (G && G.gw ? " " + G.gw : "") + " does not answer. Restart the router or check the cable / Wi-Fi."}
+        } else if (!net.ok && !webOk) {
+            verdict = portal
+                ? {status: "warn", title: "Sign-in required", hint: "This network shows a sign-in page. Open any website in the browser and sign in."}
+                : {status: "fail", title: "No internet access", hint: "The router answers, but the internet does not. Check the router's internet connection or call the provider."}
+        } else if (dnsFail) {
+            verdict = {status: "fail", title: "DNS does not work", hint: "Websites do not open by name. " + (N && N.doh === "ok" ? "Cloudflare DNS 1.1.1.1 works: set it as DNS server or restart the router." : "Restart the router or set DNS to 1.1.1.1.")}
+        } else if (!webOk && s5.status === "fail") {
+            verdict = portal
+                ? {status: "warn", title: "Sign-in required", hint: "This network shows a sign-in page. Open any website in the browser and sign in."}
+                : {status: "fail", title: "Websites do not open", hint: "HTTPS fails" + (W && W.err ? ": " + W.err : "") + "." + (W && W.ntp === "no" ? " The system clock is not synchronized." : " Check VPN, proxy or firewall.")}
+        } else if (wifiWeak) {
+            verdict = {status: "warn", title: "Weak Wi-Fi signal", hint: "Signal " + (wifiWeak.dbm !== null ? wifiWeak.dbm + " dBm, " : "") + wifiWeak.q + "%. Move closer to the router, use 5 GHz or a cable."}
+        } else if (s4.status === "warn") {
+            verdict = net.loss >= 5
+                ? {status: "warn", title: "Unstable connection", hint: net.loss + "% of pings to the internet are lost: calls and games may stutter."}
+                : (net.avg >= 150
+                    ? {status: "warn", title: "High latency", hint: "Ping to " + net.target + " is " + root.fmtMs(net.avg) + "."}
+                    : {status: "warn", title: "Unstable latency", hint: "Jitter " + root.fmtMs(net.jitter) + ": calls and games may stutter."})
+        } else if (s2.status === "warn") {
+            verdict = {status: "warn", title: "Unstable link to the router", hint: s2.detail + ", " + s2.value + " average."}
+        } else if (dnsWarn === "hijack") {
+            verdict = {status: "warn", title: "DNS gives fake answers", hint: "Your DNS server answers for names that do not exist. Consider DNS 1.1.1.1."}
+        } else if (dnsWarn === "slow") {
+            verdict = {status: "warn", title: "Slow DNS", hint: "An uncached lookup takes " + s3.value + ": websites open slowly. Try DNS 1.1.1.1."}
+        } else if (s5.status === "warn") {
+            verdict = {status: "warn", title: "Websites respond slowly", hint: "A small HTTPS request took " + s5.value + "."}
+        } else if (v6Broken) {
+            verdict = {status: "warn", title: "IPv6 does not work", hint: "An IPv6 address is set, but IPv6 traffic fails: some apps may be slow."}
+        } else if (W && W.ntp === "no") {
+            verdict = {status: "warn", title: "Clock not synchronized", hint: "Secure websites may fail when the system time is wrong."}
+        } else if (mtuSmall) {
+            verdict = {status: "warn", title: "Very small MTU", hint: "Packets larger than " + (M ? M.pmtu : 0) + " bytes do not pass."}
+        } else {
+            var quality = !net.ok || net.avg < 0 ? "" : (net.loss === 0 && net.avg < 30 && net.jitter < 5 ? "Excellent" : (net.loss < 2 && net.avg < 60 && net.jitter < 10 ? "Good" : (net.loss < 5 && net.avg < 120 && net.jitter < 25 ? "Fair" : "Poor")))
+            verdict = {status: "ok", title: "Everything works", hint: quality ? "Quality: " + quality + " · " + root.fmtMs(net.avg) + " · jitter " + root.fmtMs(net.jitter) + " · " + net.loss + "% loss" : "Adapter, router, DNS, internet and websites answer."}
+        }
+        return {steps: [s1, s2, s3, s4, s5], tiles: tiles, route: d.route || [], verdict: verdict}
     }
 
     function refreshAppTraffic() {
@@ -824,13 +1512,36 @@ PlasmoidItem {
     }
     Plasma5Support.DataSource { id: uptimeApi; engine:"executable"; onNewData:function(source,data){uptimeApi.disconnectSource(source);var raw=String(data.stdout||"").trim();if(raw)root.systemUptime=root.formatUptime(raw)} }
 
-    Plasma5Support.DataSource { id: gatewayCheckApi; engine:"executable"; onNewData:function(source,data){gatewayCheckApi.disconnectSource(source);root.gatewayStatus=String(data.stdout||"").trim();root.networkCheckDone()} }
-    Plasma5Support.DataSource { id: dnsCheckApi; engine:"executable"; onNewData:function(source,data){dnsCheckApi.disconnectSource(source);root.dnsStatus=String(data.stdout||"").trim();root.networkCheckDone()} }
-    Plasma5Support.DataSource { id: internetCheckApi; engine:"executable"; onNewData:function(source,data){internetCheckApi.disconnectSource(source);var out=String(data.stdout||"").trim();var parts=out.split(/\s+/);var state=parts.length?parts[0]:"OFFLINE";var t=parts.length>1?parseFloat(parts[1]):NaN;root.internetStatus=state==="VPN"||state==="ONLINE"?"Online":"Offline";root.internetQuality=state==="ONLINE"||state==="VPN"?"online":"offline";root.vpnActive=state==="VPN";if(isFinite(t))root.latency=Math.round(t*1000)+" ms";root.networkUpdated=Qt.formatTime(new Date(),"HH:mm:ss");root.networkCheckDone()} }
-    Plasma5Support.DataSource { id: ipv4CheckApi; engine:"executable"; onNewData:function(source,data){ipv4CheckApi.disconnectSource(source);root.ipv4Status=String(data.stdout||"").trim();root.networkCheckDone()} }
-    Plasma5Support.DataSource { id: ipv6CheckApi; engine:"executable"; onNewData:function(source,data){ipv6CheckApi.disconnectSource(source);root.ipv6Status=String(data.stdout||"").trim();if(root.ipv6Status==="FAIL")root.ipv6Status="UNAVAILABLE";root.networkCheckDone()} }
-    Plasma5Support.DataSource { id: diagnosticsApi; engine:"executable"; onNewData:function(source,data){diagnosticsApi.disconnectSource(source);root.diagnosticsText=String(data.stdout||"").trim();root.diagnosticsLoading=false} }
-    Plasma5Support.DataSource { id: latencyApi; engine:"executable"; onNewData:function(source,data){latencyApi.disconnectSource(source);var s=String(data.stdout||"").trim();if(s)root.latency=s} }
+    Plasma5Support.DataSource {
+        id: statusApi; engine: "executable"
+        onNewData: function(source, data) {
+            statusApi.disconnectSource(source)
+            var state = String(data.stdout || "").trim().split(/\s+/)[0] || "OFFLINE"
+            root.internetStatus = state === "VPN" || state === "ONLINE" ? "Online" : "Offline"
+            root.internetQuality = state === "VPN" || state === "ONLINE" ? "online" : "offline"
+            root.vpnActive = state === "VPN"
+            root.networkLoading = false
+        }
+    }
+    Plasma5Support.DataSource {
+        id: diagApi; engine: "executable"
+        onNewData: function(source, data) {
+            diagApi.disconnectSource(source)
+            var m = String(source).match(/netdiag\.sh' (\w+) (\d+)$/)
+            if (!m || +m[2] !== root.diagSeq || !root.diagRunning) return
+            root.diagResult(m[1], data.stdout)
+        }
+    }
+    // A check that hangs must not keep the run open forever
+    Timer {
+        id: diagWatchdog
+        interval: 25000
+        onTriggered: {
+            for (var k in root.diagPending)
+                if (root.diagPending.hasOwnProperty(k)) diagApi.disconnectSource("bash " + root.codePath("netdiag.sh") + " " + k + " " + root.diagSeq)
+            root.finishDiagnostics()
+        }
+    }
     Plasma5Support.DataSource {
         id: speedApi; engine: "executable"
         onNewData: function(source, data) {
@@ -987,7 +1698,7 @@ PlasmoidItem {
             if(old!=="Unknown" && old!==next){
                 var title="Network device status changed"
                 var body=item.ip+" is now "+(next==="UP"?"online":"offline")
-                monitorNotifyApi.connectSource("notify-send -a 'My IP & Geo' -u normal '"+title+"' '"+body.replace(/'/g," ")+"'")
+                monitorNotifyApi.connectSource("sh "+root.codePath("notify.sh")+" '"+title+"' '"+body.replace(/'/g," ")+"' "+root.codePath("../icon.png"))
             }
         }
         root.watchedDevices=list
@@ -1007,7 +1718,7 @@ PlasmoidItem {
  onTriggered:root.refreshAppTraffic() }
     Connections {
         target: featurePanel
-        function onVisibleChanged() { root.refreshAppTraffic() }
+        function onVisibleChanged() { root.refreshAppTraffic(); root.autoRunDiagnostics() }
     }
     Timer { interval:600000
  repeat:true
@@ -1017,7 +1728,7 @@ PlasmoidItem {
  repeat:true
  running:true
  onTriggered:{ root.refreshNetwork(); root.monitorWatchedDevices() } }
-    Component.onCompleted: { appSettings.ipHistoryJson = ""; bootIdApi.connectSource("cat /proc/sys/kernel/random/boot_id"); root.loadWatchedDevices(); root.refreshAll(); root.refreshTraffic(); root.refreshAppTraffic(); root.checkDependencies(); root.monitorWatchedDevices() }
+    Component.onCompleted: { bootIdApi.connectSource("cat /proc/sys/kernel/random/boot_id"); root.loadWatchedDevices(); root.refreshAll(); root.refreshTraffic(); root.refreshAppTraffic(); root.checkDependencies(); root.monitorWatchedDevices() }
 
     compactRepresentation: Item {
         implicitWidth: 180
@@ -1483,7 +2194,7 @@ font.pixelSize:13 }
                             spacing: 5
                             Image { source: Qt.resolvedUrl("../images/github.svg"); sourceSize.width: 18; sourceSize.height: 18; Layout.preferredWidth: 18; Layout.preferredHeight: 18 }
                             Text { text: "GitHub"; color: root.themeLink; font.pixelSize: 13; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: Qt.openUrlExternally("https://github.com/f1devbin") } }
-                            Text { text: "· v6.1.39"; color: root.themeSecondary; font.pixelSize: 9 }
+                            Text { text: "· v6.1.40"; color: root.themeSecondary; font.pixelSize: 9 }
                             Item { Layout.fillWidth: true }
                         }
                     }
@@ -1653,7 +2364,7 @@ font.pixelSize:13 }
                 Controls.Button {
                     text: "Diagnostics"
                     Layout.fillWidth: true
-                    onClicked: root.toolsTab = 1
+                    onClicked: { root.toolsTab = 1; root.autoRunDiagnostics() }
                     background: Rectangle {
                         radius: 5
                         color: root.toolsTab === 1 ? root.alpha(root.themeHighlight, .16) : root.alpha(root.themeBackground, .80)
@@ -1937,39 +2648,233 @@ font.pixelSize:13 }
 
                 ColumnLayout {
                     anchors.fill: parent
-                    spacing: 6
+                    spacing: 7
                     visible: root.toolsTab === 1
-                    Controls.Button {
-                        text: root.diagnosticsLoading ? "Running…" : "Run diagnostics"
-                        enabled: !root.diagnosticsLoading
+
+                    RowLayout {
                         Layout.fillWidth: true
-                        onClicked: root.runDiagnostics()
+                        Text { text: "Network Diagnostics"; color: root.themeText; font.pixelSize: 13; font.bold: true; Layout.fillWidth: true }
+                        Text {
+                            text: root.diagRunning ? "Checking…" : (root.diagUpdated !== "" ? "Checked " + root.diagUpdated : "")
+                            color: root.diagRunning ? root.themeHighlight : root.alpha(root.themeText, 0.8)
+                            font.pixelSize: 9
+                        }
                     }
-                    Controls.Button {
-                        text: "Refresh network"
-                        enabled: !root.networkLoading
+
+                    // Verdict: the first broken link of the chain, a warning or "Everything works"
+                    Rectangle {
+                        id: diagBanner
+                        readonly property var verdict: root.diagView.verdict
+                        readonly property color tint: root.diagTint(verdict.status)
                         Layout.fillWidth: true
-                        onClicked: root.refreshNetwork()
+                        Layout.preferredHeight: Math.max(50, diagBannerText.implicitHeight + 18)
+                        radius: 10
+                        color: root.alpha(tint, 0.13)
+                        border.width: 1
+                        border.color: root.alpha(tint, 0.6)
+                        DiagIcon {
+                            id: diagBannerIcon
+                            status: diagBanner.verdict.status
+                            size: 26
+                            anchors.left: parent.left
+                            anchors.leftMargin: 11
+                            anchors.verticalCenter: parent.verticalCenter
+                        }
+                        Column {
+                            id: diagBannerText
+                            anchors.left: diagBannerIcon.right
+                            anchors.leftMargin: 11
+                            anchors.right: parent.right
+                            anchors.rightMargin: 10
+                            anchors.verticalCenter: parent.verticalCenter
+                            spacing: 2
+                            Text { width: parent.width; text: diagBanner.verdict.title; color: root.themeText; font.pixelSize: 13; font.bold: true; wrapMode: Text.Wrap }
+                            Text { width: parent.width; visible: text !== ""; text: diagBanner.verdict.hint; color: root.alpha(root.themeText, 0.88); font.pixelSize: 10; wrapMode: Text.Wrap }
+                        }
                     }
+
                     Flickable {
+                        id: diagFlick
                         Layout.fillWidth: true
                         Layout.fillHeight: true
                         clip: true
                         contentWidth: width
-                        contentHeight: diagnosticsTextItem.contentHeight
+                        contentHeight: diagColumn.height
                         interactive: contentHeight > height
-                        TextEdit {
-                            id: diagnosticsTextItem
-                            width: parent.width
-                            text: root.diagnosticsText !== "" ? root.diagnosticsText : "No diagnostics run yet."
-                            color: root.themeText
-                            font.pixelSize: 10
-                            readOnly: true
-                            selectByMouse: true
-                            selectByKeyboard: true
-                            cursorVisible: false
-                            wrapMode: TextEdit.Wrap
+                        boundsBehavior: Flickable.StopAtBounds
+                        // Details and route are below the steps: a visible bar shows there is more
+                        Controls.ScrollBar.vertical: Controls.ScrollBar {
+                            policy: Controls.ScrollBar.AlwaysOn
+                            visible: diagFlick.contentHeight > diagFlick.height + 1
                         }
+                        Column {
+                            id: diagColumn
+                            width: parent.width - 10
+                            spacing: 8
+
+                            // The chain: connection -> router -> DNS -> internet -> websites
+                            Column {
+                                width: parent.width
+                                Repeater {
+                                    model: 5
+                                    delegate: Item {
+                                        id: diagStep
+                                        readonly property var step: root.diagView.steps[index]
+                                        width: diagColumn.width
+                                        height: diagStepText.implicitHeight + 10
+                                        Rectangle {
+                                            visible: index < 4
+                                            x: 10
+                                            y: 22
+                                            width: 2
+                                            height: parent.height - 18
+                                            radius: 1
+                                            color: root.alpha(root.themeText, 0.16)
+                                        }
+                                        DiagIcon { x: 2; y: 2; size: 18; status: diagStep.step.status }
+                                        Column {
+                                            id: diagStepText
+                                            x: 30
+                                            y: 2
+                                            width: parent.width - 30
+                                            spacing: 1
+                                            Item {
+                                                width: parent.width
+                                                height: 18
+                                                Text { anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter; text: diagStep.step.title; color: root.themeText; font.pixelSize: 11; font.bold: true }
+                                                Text {
+                                                    anchors.right: parent.right
+                                                    anchors.verticalCenter: parent.verticalCenter
+                                                    text: diagStep.step.value
+                                                    color: diagStep.step.status === "warn" || diagStep.step.status === "fail" ? root.diagTint(diagStep.step.status) : root.themeText
+                                                    font.pixelSize: 11
+                                                    font.bold: true
+                                                }
+                                            }
+                                            TextEdit {
+                                                width: parent.width
+                                                visible: text !== ""
+                                                text: diagStep.step.detail
+                                                color: root.alpha(root.themeText, 0.85)
+                                                font.pixelSize: 10
+                                                wrapMode: TextEdit.Wrap
+                                                readOnly: true
+                                                selectByMouse: true
+                                                selectByKeyboard: true
+                                                cursorVisible: false
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Details: public IP, IPv6, VPN, path MTU
+                            GridLayout {
+                                width: parent.width
+                                columns: 2
+                                rowSpacing: 6
+                                columnSpacing: 6
+                                Repeater {
+                                    model: 4
+                                    delegate: Rectangle {
+                                        id: diagTile
+                                        readonly property var tile: root.diagView.tiles[index]
+                                        Layout.fillWidth: true
+                                        Layout.preferredWidth: 1
+                                        Layout.fillHeight: true
+                                        Layout.preferredHeight: diagTileText.implicitHeight + 14
+                                        radius: 8
+                                        color: root.alpha(root.themeText, 0.045)
+                                        border.width: 1
+                                        border.color: root.alpha(root.themeText, 0.08)
+                                        Column {
+                                            id: diagTileText
+                                            x: 9
+                                            y: 7
+                                            width: parent.width - 18
+                                            spacing: 2
+                                            Row {
+                                                spacing: 5
+                                                Rectangle { width: 7; height: 7; radius: 3.5; anchors.verticalCenter: parent.verticalCenter; color: root.diagTint(diagTile.tile.status) }
+                                                Text { text: diagTile.tile.title; color: root.alpha(root.themeText, 0.85); font.pixelSize: 9 }
+                                            }
+                                            TextEdit {
+                                                width: parent.width
+                                                text: diagTile.tile.value
+                                                color: root.themeText
+                                                font.pixelSize: 11
+                                                font.bold: true
+                                                wrapMode: TextEdit.WrapAnywhere
+                                                readOnly: true
+                                                selectByMouse: true
+                                                selectByKeyboard: true
+                                                cursorVisible: false
+                                            }
+                                            TextEdit {
+                                                width: parent.width
+                                                visible: text !== ""
+                                                text: diagTile.tile.detail
+                                                color: root.alpha(root.themeText, 0.85)
+                                                font.pixelSize: 9
+                                                wrapMode: TextEdit.Wrap
+                                                readOnly: true
+                                                selectByMouse: true
+                                                selectByKeyboard: true
+                                                cursorVisible: false
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Routers on the way to 1.1.1.1
+                            Column {
+                                width: parent.width
+                                visible: root.diagView.route.length > 0
+                                spacing: 2
+                                Text { text: "Route to 1.1.1.1"; color: root.themeText; font.pixelSize: 11; font.bold: true; bottomPadding: 2 }
+                                Repeater {
+                                    model: root.diagView.route
+                                    delegate: Rectangle {
+                                        width: diagColumn.width
+                                        height: 22
+                                        radius: 5
+                                        color: index % 2 ? "transparent" : root.alpha(root.themeText, 0.035)
+                                        RowLayout {
+                                            anchors.fill: parent
+                                            anchors.leftMargin: 6
+                                            anchors.rightMargin: 8
+                                            spacing: 8
+                                            Text { text: modelData.ttl; color: root.themeText; font.pixelSize: 10; font.bold: true; Layout.preferredWidth: 16; horizontalAlignment: Text.AlignRight }
+                                            TextEdit {
+                                                text: modelData.ip === "*" ? "no answer" : modelData.ip
+                                                color: modelData.ip === "*" ? root.alpha(root.themeText, 0.75) : root.themeText
+                                                font.pixelSize: 10
+                                                readOnly: true
+                                                selectByMouse: true
+                                                selectByKeyboard: true
+                                                cursorVisible: false
+                                            }
+                                            Text { text: modelData.name; color: root.themeLink; font.pixelSize: 9; elide: Text.ElideRight; Layout.fillWidth: true }
+                                            Text {
+                                                text: modelData.reached === 2 ? "unreachable" : (modelData.rtt >= 0 ? root.fmtMs(modelData.rtt) : "—")
+                                                color: modelData.reached === 2 ? "#ff4040" : root.themeText
+                                                font.pixelSize: 10
+                                                font.bold: modelData.reached === 1
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Controls.Button {
+                        text: root.diagRunning ? "Checking…" : (root.diagFinished > 0 ? "Run again" : "Run diagnostics")
+                        enabled: !root.diagRunning
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: 32
+                        onClicked: root.runDiagnostics()
                     }
                 }
 

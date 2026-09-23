@@ -1,8 +1,21 @@
 # My IP & Geo
 
-Version 6.1.39
+Version 6.1.40
 
 Compact KDE Plasma 6 widget for public IP/geolocation, local network information and network tools.
+
+## Requirements
+- KDE Plasma 6 (tested on Kubuntu 26.04). Nothing to install and no root rights: the widget uses `curl`, `ip`, `ping`, `ss` and standard shell tools, all present on Kubuntu by default.
+- Used when present, never required: `iw` or NetworkManager (Wi-Fi details), `resolvectl` (DNS servers), `notify-send` (notifications, D-Bus is used otherwise), KDE System Monitor's `ksgrd_network_helper` (per-application traffic).
+
+## v6.1.40
+- Diagnostics redesigned. It checks the whole chain — connection → router → DNS → internet → websites — and names the first broken link with a plain hint (for example "DNS does not work … Cloudflare DNS 1.1.1.1 works: set it as DNS server"), or shows "Everything works" with the connection quality (latency, jitter, packet loss). Warnings: weak Wi-Fi, packet loss, high or unstable latency, slow DNS, DNS answering for names that do not exist, broken IPv6, unsynchronized clock.
+- Steps show real measurements. Connection: adapter, Wi-Fi network, band, signal (dBm and %), link rate, or Ethernet speed. Router: 5 pings and loss; a router that ignores ping but answers ARP counts as reachable. DNS: servers in use and the time of an uncached lookup; when DNS fails, DNS over HTTPS to 1.1.1.1 tells a DNS problem from a missing internet connection. Internet: 10 pings each to 1.1.1.1 and 8.8.8.8, TCP connect when ping is blocked. Websites: HTTPS request to Cloudflare with DNS, connect, TLS and reply times; a sign-in page (captive portal) is detected.
+- Tiles: public IP (country, Cloudflare location, WARP), IPv6, VPN (name and whether internet traffic goes through it), path MTU. Route to 1.1.1.1: every router with its name and round-trip time.
+- All checks run in parallel when the tab is opened (if the last run is older than 5 minutes) and with Run again; results appear as they arrive, about 2–3 s on a working network. Script: `contents/code/netdiag.sh`.
+- Header indicators fixed. The internet dot turned red only without a default route: `curl -w` prints a time for failed requests too, so a dead internet behind a working router still showed green; now only a successful request counts. The VPN shield never lit for WireGuard, Cloudflare WARP or OpenVPN (tun): their interfaces report operstate `unknown`; now the UP/LOWER_UP flags plus an address decide.
+- Less background work: every 30 s only the internet/VPN check runs. Before, a router ping, a DNS lookup, an IPv4 route check, an IPv6 request and a forced NetworkManager connectivity check ran too, and their results were not shown anywhere.
+- No extra packages: settings moved from `Qt.labs.settings` (package qml6-module-qt-labs-settings, not installed on Kubuntu by default and deprecated) to `QtCore` Settings, which comes with Plasma; watched devices and app traffic totals are kept (same settings file). DNS servers in Local IPs come from resolvectl, NetworkManager or /etc/resolv.conf; Monitor notifications use notify-send or the desktop notification service over D-Bus (`contents/code/notify.sh`). The "Missing" hint lists only curl, iproute2 and iputils-ping.
 
 ## v6.1.39
 - Network Apps: expanded details no longer repeat identical rows. Several connections to the same remote address and port (they differ only by the local port, which is not shown) are listed once with a blue `×N` after the address. TCP / UDP / Total still count every connection.
