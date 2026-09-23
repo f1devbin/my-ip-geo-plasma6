@@ -1,8 +1,35 @@
 # My IP & Geo
 
-Version 6.1.29
+Version 6.1.35
 
 Compact KDE Plasma 6 widget for public IP/geolocation, local network information and network tools.
+
+
+## v6.1.35
+- Network Apps: expanded details show real data instead of `—` and `0`. `ss` omits the State column when the filter selects a single state (`state established` for TCP, connected sockets only for UDP), so fixed field positions pointed at the wrong fields. Endpoints are now located by content; IPv4, bracketed IPv6, IPv4-mapped IPv6, `%interface` scopes and wildcards are handled.
+- Network Apps: expanded rows stay open across refreshes. State is kept per `process|PID`, several rows can be open at once; state of applications that disappear is dropped.
+- Network Apps: removed the 3-second auto-refresh. The list refreshes when Apps or the Tools panel is opened, with the Apps Refresh button, and every 10 minutes while visible.
+- Network Apps: new results replace the list in one step and only when they changed; if `ss` fails, the previous list stays on screen.
+- Network Apps: connections are sorted by protocol, address and port, so an open list does not reshuffle between refreshes; row height follows its content, so long lists no longer overlap the next application.
+- Network Apps: numeric columns aligned with the TCP / UDP / Total header.
+- Footer version label matches the package version again.
+
+## v6.1.34
+- Network Apps: expanded row key moved from the delegate to the widget root (one row at a time); remote endpoint read from a different field index. Superseded by 6.1.35.
+
+## v6.1.33
+- Network Apps: attempted fix for row clicks/expansion. Superseded by 6.1.35.
+
+## v6.1.32
+- Network Apps keeps only information available through ordinary user-accessible Linux socket information.
+- Per-application RX/TX byte totals are intentionally not shown because they are not reliably available to an unprivileged user for all processes and protocols.
+- Fixed TCP/UDP remote endpoint parsing in the expanded application details.
+- Expanded details now show the actual socket state when Linux reports one.
+- No sudo, root access, capabilities, NetHogs, or additional packages are required.
+
+## v6.1.30
+- Network Apps now expands per-application connection details: PID, TCP/UDP/total counts, protocol, remote address, port, and connection activity/state.
+- No root access, sudo, capabilities, or additional packages required.
 
 ## v6.1.29
 - Reworked the Apps tool into **Network Apps**.
@@ -76,16 +103,3 @@ Compact KDE Plasma 6 widget for public IP/geolocation, local network information
 - ID: `com.f1devbin.myipgeo`
 - Plasma 6 / Qt 6
 - License: MIT
-
-
-## v6.1.30
-- Network Apps now expands per-application connection details: PID, TCP/UDP/total counts, protocol, remote address, port, and connection activity/state.
-- No root access, sudo, capabilities, or additional packages required.
-
-
-## v6.1.32
-- Network Apps keeps only information available through ordinary user-accessible Linux socket information.
-- Per-application RX/TX byte totals are intentionally not shown because they are not reliably available to an unprivileged user for all processes and protocols.
-- Fixed TCP/UDP remote endpoint parsing in the expanded application details.
-- Expanded details now show the actual socket state when Linux reports one.
-- No sudo, root access, capabilities, NetHogs, or additional packages are required.
