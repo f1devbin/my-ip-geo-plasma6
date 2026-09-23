@@ -507,10 +507,24 @@ PlasmoidItem {
         function byEndpoint(a, b) {
             if (a.protocol !== b.protocol) return a.protocol < b.protocol ? -1 : 1
             if (a.address !== b.address) return a.address < b.address ? -1 : 1
-            return (Number(a.port) || 0) - (Number(b.port) || 0)
+            var p = (Number(a.port) || 0) - (Number(b.port) || 0)
+            if (p !== 0) return p
+            return a.state === b.state ? 0 : (a.state < b.state ? -1 : 1)
         }
         for (var r = 0; r < rows.length; ++r) {
-            rows[r].connections = rows[r].connections.sort(byEndpoint).slice(0, 30)
+            // Sockets to the same remote address and port differ only by the local port, which is not shown:
+            // one row with a count instead of identical rows
+            var seen = {}
+            var unique = []
+            var conns = rows[r].connections
+            for (var c = 0; c < conns.length; ++c) {
+                var id = conns[c].protocol + "|" + conns[c].address + "|" + conns[c].port + "|" + conns[c].state
+                if (seen.hasOwnProperty(id)) { seen[id].count++; continue }
+                conns[c].count = 1
+                seen[id] = conns[c]
+                unique.push(conns[c])
+            }
+            rows[r].connections = unique.sort(byEndpoint).slice(0, 30)
             rows[r].display = root.appDisplayName(rows[r].process)
         }
         return rows
@@ -1469,7 +1483,7 @@ font.pixelSize:13 }
                             spacing: 5
                             Image { source: Qt.resolvedUrl("../images/github.svg"); sourceSize.width: 18; sourceSize.height: 18; Layout.preferredWidth: 18; Layout.preferredHeight: 18 }
                             Text { text: "GitHub"; color: root.themeLink; font.pixelSize: 13; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: Qt.openUrlExternally("https://github.com/f1devbin") } }
-                            Text { text: "· v6.1.38"; color: root.themeSecondary; font.pixelSize: 9 }
+                            Text { text: "· v6.1.39"; color: root.themeSecondary; font.pixelSize: 9 }
                             Item { Layout.fillWidth: true }
                         }
                     }
@@ -2312,7 +2326,29 @@ font.pixelSize:13 }
                                                 delegate: Row {
                                                     width: parent.width; height: 22
                                                     Text { text: modelData.protocol; color: root.themeText; font.pixelSize: 8; width: 52 }
-                                                    Text { text: modelData.address; color: root.themeText; font.pixelSize: 8; elide: Text.ElideMiddle; width: Math.max(70, parent.width - 52 - 72 - 86) }
+                                                    // "×N": N connections to this address and port
+                                                    Item {
+                                                        width: Math.max(70, parent.width - 52 - 72 - 86)
+                                                        height: connAddress.implicitHeight
+                                                        Text {
+                                                            id: connAddress
+                                                            text: modelData.address
+                                                            color: root.themeText
+                                                            font.pixelSize: 8
+                                                            elide: Text.ElideMiddle
+                                                            width: Math.min(implicitWidth, parent.width - (connCount.visible ? connCount.implicitWidth + 5 : 0))
+                                                        }
+                                                        Text {
+                                                            id: connCount
+                                                            // right after the text as drawn, also when a long address is shortened with "…"
+                                                            x: connAddress.contentWidth + 5
+                                                            visible: modelData.count > 1
+                                                            text: "×" + modelData.count
+                                                            color: root.themeLink
+                                                            font.pixelSize: 8
+                                                            font.bold: true
+                                                        }
+                                                    }
                                                     Text { text: modelData.port; color: root.themeText; font.pixelSize: 8; width: 72; horizontalAlignment: Text.AlignRight }
                                                     Text { text: modelData.state; color: root.themePositive; font.pixelSize: 8; width: 86; horizontalAlignment: Text.AlignRight }
                                                 }

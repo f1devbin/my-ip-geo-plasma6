@@ -1,8 +1,11 @@
 # My IP & Geo
 
-Version 6.1.38
+Version 6.1.39
 
 Compact KDE Plasma 6 widget for public IP/geolocation, local network information and network tools.
+
+## v6.1.39
+- Network Apps: expanded details no longer repeat identical rows. Several connections to the same remote address and port (they differ only by the local port, which is not shown) are listed once with a blue `×N` after the address. TCP / UDP / Total still count every connection.
 
 ## v6.1.38
 - Network Apps: every application shows its traffic since boot (↓ received / ↑ sent) next to the current speed. The KDE System Monitor helper runs in the background in back-to-back 2-minute chunks (the first one takes 20 s), totals are kept per application and saved with the boot id: they survive Plasma restarts and start from zero after a reboot. Counting starts when Plasma starts (at login); without root there is no way to see traffic from before that. Each restart of the helper misses one to two seconds, so totals can be 1–2% low. CPU cost measured at 100 Mbit/s: under 1% of one core.
