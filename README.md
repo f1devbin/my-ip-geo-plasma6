@@ -1,8 +1,14 @@
 # My IP & Geo
 
-Version 6.1.37
+Version 6.1.38
 
 Compact KDE Plasma 6 widget for public IP/geolocation, local network information and network tools.
+
+## v6.1.38
+- Network Apps: every application shows its traffic since boot (↓ received / ↑ sent) next to the current speed. The KDE System Monitor helper runs in the background in back-to-back 2-minute chunks (the first one takes 20 s), totals are kept per application and saved with the boot id: they survive Plasma restarts and start from zero after a reboot. Counting starts when Plasma starts (at login); without root there is no way to see traffic from before that. Each restart of the helper misses one to two seconds, so totals can be 1–2% low. CPU cost measured at 100 Mbit/s: under 1% of one core.
+- Network Apps: applications are ordered by traffic since boot; applications that used the network earlier but have no connections now are listed as "not connected" with their totals (up to 20 rows).
+- Tools panel is fully opaque: at 99% the main view showed through, so text from the widget behind overlapped the Scanner list.
+- IP History removed (tab, recording and the stored list).
 
 ## v6.1.37
 - Network Scanner rebuilt, nmap is no longer needed. Every address is pinged once; to send the ping the kernel resolves the address with ARP, so devices that ignore ping (phones, Windows with a firewall) are found too. Cached ARP entries are re-checked, so devices that have left the network are not listed.
@@ -107,7 +113,6 @@ Compact KDE Plasma 6 widget for public IP/geolocation, local network information
 ## Tools
 - Scanner
 - Diagnostics
-- IP History
 - Speed
 - Network Apps
 - Monitor

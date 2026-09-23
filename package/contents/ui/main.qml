@@ -33,6 +33,14 @@ PlasmoidItem {
     property var appExpanded: ({})
     property string appTrafficStatus: "Ready"
     property string appRatesState: ""
+    property var appUsage: ({})
+    property string appUsageBoot: ""
+    property string appUsageState: ""
+    property string appUsageUpdated: ""
+    property real appUsageChunkStart: 0
+    property int appUsageChunkSecs: 120
+    property int appUsageSeq: 0
+    property int speedSampleSeq: 0
     property bool dependenciesLoading: false
     property string missingDependencies: ""
     property string installCommand: ""
@@ -114,13 +122,14 @@ PlasmoidItem {
     property string trafficReceived: "—"
     property string trafficSent: "—"
     property string trafficUpdated: "—"
-    property var ipHistory: []
     property string diagnosticsSummary: ""
 
     Settings {
         id: appSettings
         property string watchedDevicesJson: "[]"
-        property string ipHistoryJson: "[]"
+        // Former IP History storage (feature removed in 6.1.38); emptied on start
+        property string ipHistoryJson: ""
+        property string appUsageJson: ""
     }
 
     Plasmoid.icon: "/icon.png"
@@ -308,19 +317,6 @@ PlasmoidItem {
 
     function saveWatchedDevices() {
         appSettings.watchedDevicesJson = JSON.stringify(root.watchedDevices)
-    }
-
-    function saveIpHistory() {
-        appSettings.ipHistoryJson = JSON.stringify(root.ipHistory)
-    }
-
-    function loadIpHistory() {
-        try {
-            var parsed = JSON.parse(appSettings.ipHistoryJson || "[]")
-            root.ipHistory = Array.isArray(parsed) ? parsed.slice(0, 30) : []
-        } catch (e) {
-            root.ipHistory = []
-        }
     }
 
     function loadWatchedDevices() {
@@ -551,12 +547,60 @@ PlasmoidItem {
 
     function appDisplayName(name) {
         var n = String(name || "").trim()
+        if (n === "?") return "Unknown process"
         if (n === "chrome") return "Chromium"
         if (n === "telegram-deskto") return "Telegram Desktop"
         if (n === "warp-taskbar") return "Cloudflare WARP"
         if (n === "syncthing") return "Syncthing"
         if (n === "wechat") return "WeChat"
         return n || "Unknown"
+    }
+
+    // Traffic per application since boot. KDE's helper only sees traffic while it runs, so it runs
+    // in back-to-back 2-minute chunks from Plasma start. Totals are kept per process name and saved
+    // with the boot id: they survive Plasma restarts, a reboot starts from zero.
+    function startAppUsage(secs) {
+        root.appUsageChunkSecs = secs > 0 ? secs : 120
+        root.appUsageChunkStart = Date.now()
+        // A new command string every time: re-connecting the same source right after it finished
+        // makes the executable engine hand back the previous result instead of running it again
+        root.appUsageSeq += 1
+        appUsageApi.connectSource("sh " + root.codePath("appusage.sh") + " " + root.appUsageChunkSecs + " " + root.appUsageSeq)
+    }
+
+    function loadAppUsage(bootId) {
+        root.appUsageBoot = bootId
+        var saved = null
+        try { saved = JSON.parse(appSettings.appUsageJson || "null") } catch (e) { saved = null }
+        root.appUsage = saved && saved.boot === bootId && saved.apps ? saved.apps : ({})
+        root.saveAppUsage()
+        // A short first chunk, so totals show up soon after Plasma starts
+        root.startAppUsage(20)
+    }
+
+    function saveAppUsage() {
+        appSettings.appUsageJson = JSON.stringify({boot: root.appUsageBoot, apps: root.appUsage})
+    }
+
+    // appusage.sh lines "<pid> <rx> <tx> <name>" added to the totals (a new object, so bindings update)
+    function mergeAppUsage(text) {
+        var next = {}
+        for (var k in root.appUsage)
+            if (root.appUsage.hasOwnProperty(k)) next[k] = {rx: root.appUsage[k].rx, tx: root.appUsage[k].tx}
+        var lines = String(text || "").split("\n")
+        for (var i = 0; i < lines.length; ++i) {
+            var m = lines[i].match(/^(\d+) (\d+) (\d+) (.+)$/)
+            if (!m) continue
+            if (!next[m[4]]) next[m[4]] = {rx: 0, tx: 0}
+            next[m[4]].rx += +m[2]
+            next[m[4]].tx += +m[3]
+        }
+        return next
+    }
+
+    function appUsageTotal(name) {
+        var u = root.appUsage[name]
+        return u ? u.rx + u.tx : 0
     }
 
     function runSpeedTest() {
@@ -725,7 +769,6 @@ PlasmoidItem {
                 var d = JSON.parse(data.stdout || "")
                 if (!d.success) { root.errorText = "API error: " + (d.message || "unknown"); return }
                 root.errorText = ""
-                var oldIp = root.publicIp
                 root.publicIp = d.ip || "—"; root.country = d.country || "—"; root.countryCode = d.country_code || ""
                 root.city = d.city || "—"; root.region = d.region || "—"
                 root.latitude = d.latitude !== undefined ? Number(d.latitude).toFixed(5) : "—"
@@ -734,15 +777,6 @@ PlasmoidItem {
                 root.asn = d.connection && d.connection.asn ? "AS" + d.connection.asn : "—"
                 root.timezone = d.timezone && d.timezone.id ? d.timezone.id : "—"
                 root.updated = Qt.formatTime(new Date(), "HH:mm:ss")
-                if (root.publicIp !== "—" && root.publicIp !== oldIp) {
-                    var h = root.ipHistory.slice(0)
-                    if (h.length === 0 || h[0].ip !== root.publicIp) {
-                        h.unshift({ip: root.publicIp, time: Qt.formatDateTime(new Date(), "yyyy-MM-dd HH:mm:ss")})
-                        if (h.length > 30) h.pop()
-                        root.ipHistory = h
-                        root.saveIpHistory()
-                    }
-                }
             } catch (e) { root.errorText = "API error: invalid response" }
         }
     }
@@ -813,9 +847,37 @@ PlasmoidItem {
         interval: 500
         repeat: true
         running: root.speedPhase === "download" || root.speedPhase === "upload"
-        onTriggered: speedSampleApi.connectSource("cat /proc/net/dev")
+        onTriggered: {
+            root.speedSampleSeq += 1
+            speedSampleApi.connectSource("MYIPGEO_SEQ=" + root.speedSampleSeq + " cat /proc/net/dev")
+        }
     }
     Plasma5Support.DataSource { id: trafficApi; engine:"executable"; onNewData:function(source,data){trafficApi.disconnectSource(source);var p=String(data.stdout||"").trim().split(/\s+/);if(p.length>=2){root.trafficReceived=root.formatBytes(p[0]);root.trafficSent=root.formatBytes(p[1]);root.trafficUpdated=Qt.formatTime(new Date(),"HH:mm:ss")}} }
+    Plasma5Support.DataSource {
+        id: appUsageApi; engine: "executable"
+        onNewData: function(source, data) {
+            appUsageApi.disconnectSource(source)
+            var out = String(data.stdout || "")
+            var ran = (Date.now() - root.appUsageChunkStart) / 1000
+            if (out.indexOf("__OK__") === -1) {
+                root.appUsageState = out.indexOf("__MISSING__") !== -1 ? "missing" : "failed"
+                appUsageRetry.start()
+                return
+            }
+            // A chunk that ended far too early is not trusted and retried later instead of spinning
+            if (ran < root.appUsageChunkSecs / 2) { appUsageRetry.start(); return }
+            root.appUsageState = "ok"
+            root.appUsage = root.mergeAppUsage(out)
+            root.appUsageUpdated = Qt.formatTime(new Date(), "HH:mm")
+            root.saveAppUsage()
+            Qt.callLater(function() { root.startAppUsage(120) })
+        }
+    }
+    Plasma5Support.DataSource {
+        id: bootIdApi; engine: "executable"
+        onNewData: function(source, data) { bootIdApi.disconnectSource(source); root.loadAppUsage(String(data.stdout || "").trim()) }
+    }
+    Timer { id: appUsageRetry; interval: 600000; onTriggered: root.startAppUsage(120) }
     Plasma5Support.DataSource { id: appTrafficApi; engine:"executable"; onNewData:function(source,data){
         appTrafficApi.disconnectSource(source)
         var out = String(data.stdout || "")
@@ -834,7 +896,24 @@ PlasmoidItem {
             rows[r].rx = rates.state === "ok" ? (rate ? rate.rx : 0) : -1
             rows[r].tx = rates.state === "ok" ? (rate ? rate.tx : 0) : -1
         }
-        var shown = rows.slice(0, 12)
+        // Busiest applications since boot first; applications without connections now keep their totals too
+        rows.sort(function(a, b) {
+            var d = root.appUsageTotal(b.process) - root.appUsageTotal(a.process)
+            if (d !== 0) return d
+            if (b.total !== a.total) return b.total - a.total
+            var n = a.process.localeCompare(b.process)
+            return n !== 0 ? n : Number(a.pid) - Number(b.pid)
+        })
+        var connected = {}
+        for (var c = 0; c < rows.length; ++c) connected[rows[c].process] = true
+        var idle = []
+        for (var name in root.appUsage) {
+            if (!root.appUsage.hasOwnProperty(name) || connected[name] || root.appUsageTotal(name) <= 0) continue
+            idle.push({process: name, pid: "", tcp: 0, udp: 0, total: 0, connections: [], display: root.appDisplayName(name), rx: -1, tx: -1, idle: true})
+        }
+        idle.sort(function(a, b) { return root.appUsageTotal(b.process) - root.appUsageTotal(a.process) })
+        var shown = rows.slice(0, 20)
+        shown = shown.concat(idle.slice(0, Math.max(0, 20 - shown.length)))
         var present = {}
         for (var i = 0; i < shown.length; ++i) present[shown[i].process + "|" + shown[i].pid] = true
         var kept = {}
@@ -924,7 +1003,7 @@ PlasmoidItem {
  repeat:true
  running:true
  onTriggered:{ root.refreshNetwork(); root.monitorWatchedDevices() } }
-    Component.onCompleted: { root.loadWatchedDevices(); root.loadIpHistory(); root.refreshAll(); root.refreshTraffic(); root.refreshAppTraffic(); root.checkDependencies(); root.monitorWatchedDevices() }
+    Component.onCompleted: { appSettings.ipHistoryJson = ""; bootIdApi.connectSource("cat /proc/sys/kernel/random/boot_id"); root.loadWatchedDevices(); root.refreshAll(); root.refreshTraffic(); root.refreshAppTraffic(); root.checkDependencies(); root.monitorWatchedDevices() }
 
     compactRepresentation: Item {
         implicitWidth: 180
@@ -1390,7 +1469,7 @@ font.pixelSize:13 }
                             spacing: 5
                             Image { source: Qt.resolvedUrl("../images/github.svg"); sourceSize.width: 18; sourceSize.height: 18; Layout.preferredWidth: 18; Layout.preferredHeight: 18 }
                             Text { text: "GitHub"; color: root.themeLink; font.pixelSize: 13; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: Qt.openUrlExternally("https://github.com/f1devbin") } }
-                            Text { text: "· v6.1.37"; color: root.themeSecondary; font.pixelSize: 9 }
+                            Text { text: "· v6.1.38"; color: root.themeSecondary; font.pixelSize: 9 }
                             Item { Layout.fillWidth: true }
                         }
                     }
@@ -1513,7 +1592,7 @@ font.pixelSize:13 }
         height: Math.min(parent.height - 24, 560)
         radius: 14
         z: 100
-        color: root.alpha(root.themeBackground, .99)
+        color: root.alpha(root.themeBackground, 1)
         border.width: 1
         border.color: "#ff3030"
 
@@ -1566,18 +1645,6 @@ font.pixelSize:13 }
                         color: root.toolsTab === 1 ? root.alpha(root.themeHighlight, .16) : root.alpha(root.themeBackground, .80)
                         border.width: 1
                         border.color: root.toolsTab === 1 ? root.themeHighlight : root.alpha(root.themeText, .10)
-                    }
-                    contentItem: Text { text: parent.text; color: root.themeText; font.pixelSize: 10; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
-                }
-                Controls.Button {
-                    text: "IP History"
-                    Layout.fillWidth: true
-                    onClicked: root.toolsTab = 2
-                    background: Rectangle {
-                        radius: 5
-                        color: root.toolsTab === 2 ? root.alpha(root.themeHighlight, .16) : root.alpha(root.themeBackground, .80)
-                        border.width: 1
-                        border.color: root.toolsTab === 2 ? root.themeHighlight : root.alpha(root.themeText, .10)
                     }
                     contentItem: Text { text: parent.text; color: root.themeText; font.pixelSize: 10; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
                 }
@@ -1894,66 +1961,6 @@ font.pixelSize:13 }
 
                 ColumnLayout {
                     anchors.fill: parent
-                    spacing: 6
-                    visible: root.toolsTab === 2
-                    Text {
-                        text: root.ipHistory.length ? "Recent public IP addresses" : "No IP changes recorded yet."
-                        color: root.themeSecondary
-                        font.pixelSize: 9
-                        Layout.fillWidth: true
-                    }
-                    Flickable {
-                        Layout.fillWidth: true
-                        Layout.fillHeight: true
-                        clip: true
-                        contentWidth: width
-                        contentHeight: historyColumn.height
-                        interactive: contentHeight > height
-                        boundsBehavior: Flickable.StopAtBounds
-                        Column {
-                            id: historyColumn
-                            width: parent.width
-                            spacing: 4
-                            Repeater {
-                                model: root.ipHistory
-                                delegate: Rectangle {
-                                    width: historyColumn.width
-                                    height: 34
-                                    radius: 6
-                                    color: root.alpha(root.themeText, .045)
-                                    border.width: 1
-                                    border.color: root.alpha(root.themeText, .08)
-                                    RowLayout {
-                                        anchors.fill: parent
-                                        anchors.leftMargin: 8
-                                        anchors.rightMargin: 8
-                                        TextEdit {
-                                            text: modelData.ip
-                                            color: root.themeText
-                                            font.pixelSize: 10
-                                            readOnly: true
-                                            selectByMouse: true
-                                            selectByKeyboard: true
-                                            cursorVisible: false
-                                            Layout.fillWidth: true
-                                            verticalAlignment: Text.AlignVCenter
-                                        }
-                                        Text {
-                                            text: modelData.time
-                                            color: root.themeSecondary
-                                            font.pixelSize: 8
-                                            Layout.preferredWidth: 110
-                                            horizontalAlignment: Text.AlignRight
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                ColumnLayout {
-                    anchors.fill: parent
                     spacing: 7
                     visible: root.toolsTab === 3
 
@@ -2219,6 +2226,9 @@ font.pixelSize:13 }
                                     // Expanded state lives in root.appExpanded (key process|pid), so it survives model updates
                                     readonly property string appKey: modelData ? String(modelData.process) + "|" + String(modelData.pid) : ""
                                     readonly property bool expanded: root.appExpanded[appKey] === true
+                                    // No connections now, listed only for its traffic since boot
+                                    readonly property bool idle: modelData ? modelData.idle === true : false
+                                    readonly property var usage: modelData ? root.appUsage[modelData.process] : undefined
                                     width: appTrafficColumn.width
                                     height: appRowContent.implicitHeight + (expanded ? 6 : 0)
                                     radius: 6
@@ -2231,32 +2241,55 @@ font.pixelSize:13 }
                                         spacing: 4
                                         Item {
                                             width: parent.width
-                                            height: 34
+                                            height: 46
                                             RowLayout {
-                                                anchors.fill: parent
+                                                anchors.left: parent.left
+                                                anchors.right: parent.right
                                                 anchors.rightMargin: 8
-                                                Text { text: appRow.expanded ? "⌄" : "›"; color: root.themeSecondary; font.pixelSize: 14; Layout.preferredWidth: 22; horizontalAlignment: Text.AlignHCenter }
-                                                ColumnLayout {
-                                                    Layout.fillWidth: true
-                                                    spacing: 1
-                                                    Text { text: modelData.display; color: root.themeText; font.pixelSize: 9; elide: Text.ElideRight; Layout.fillWidth: true }
-                                                    Row {
-                                                        visible: modelData.rx >= 0
-                                                        spacing: 3
-                                                        Image { source: Qt.resolvedUrl("../images/arrow-down.svg"); sourceSize.width: 8; sourceSize.height: 10; anchors.verticalCenter: parent.verticalCenter }
-                                                        Text { text: root.formatBytes(modelData.rx) + "/s"; color: root.themeText; font.pixelSize: 8; anchors.verticalCenter: parent.verticalCenter }
-                                                        Item { width: 6; height: 1 }
-                                                        Image { source: Qt.resolvedUrl("../images/arrow-up.svg"); sourceSize.width: 8; sourceSize.height: 10; anchors.verticalCenter: parent.verticalCenter }
-                                                        Text { text: root.formatBytes(modelData.tx) + "/s"; color: root.themeText; font.pixelSize: 8; anchors.verticalCenter: parent.verticalCenter }
-                                                    }
-                                                }
-                                                Text { text: "PID " + modelData.pid; color: root.themeSecondary; font.pixelSize: 8; Layout.preferredWidth: 62; horizontalAlignment: Text.AlignRight }
+                                                anchors.top: parent.top
+                                                anchors.topMargin: 4
+                                                height: 20
+                                                Text { text: appRow.idle ? "" : (appRow.expanded ? "⌄" : "›"); color: root.themeSecondary; font.pixelSize: 14; Layout.preferredWidth: 22; horizontalAlignment: Text.AlignHCenter }
+                                                Text { text: modelData.display; color: root.themeText; opacity: appRow.idle ? 0.7 : 1; font.pixelSize: 10; font.bold: true; elide: Text.ElideRight; Layout.fillWidth: true }
+                                                Text { text: appRow.idle ? "not connected" : "PID " + modelData.pid; color: root.themeSecondary; font.pixelSize: 8; Layout.preferredWidth: 62; horizontalAlignment: Text.AlignRight }
                                                 Text { text: modelData.tcp; color: root.themeText; font.pixelSize: 8; Layout.preferredWidth: 42; horizontalAlignment: Text.AlignRight }
                                                 Text { text: modelData.udp; color: root.themeText; font.pixelSize: 8; Layout.preferredWidth: 42; horizontalAlignment: Text.AlignRight }
                                                 Text { text: modelData.total; color: root.themeText; font.pixelSize: 8; Layout.preferredWidth: 48; horizontalAlignment: Text.AlignRight }
                                             }
+                                            // Second line: current speed (3 s sample) and traffic since boot
+                                            Row {
+                                                x: 27
+                                                y: 26
+                                                spacing: 4
+                                                Row {
+                                                    visible: modelData.rx >= 0
+                                                    spacing: 3
+                                                    Image { source: Qt.resolvedUrl("../images/arrow-down.svg"); sourceSize.width: 8; sourceSize.height: 10; anchors.verticalCenter: parent.verticalCenter }
+                                                    Text { text: root.formatBytes(modelData.rx) + "/s"; color: root.themeText; font.pixelSize: 8; anchors.verticalCenter: parent.verticalCenter }
+                                                    Item { width: 4; height: 1 }
+                                                    Image { source: Qt.resolvedUrl("../images/arrow-up.svg"); sourceSize.width: 8; sourceSize.height: 10; anchors.verticalCenter: parent.verticalCenter }
+                                                    Text { text: root.formatBytes(modelData.tx) + "/s"; color: root.themeText; font.pixelSize: 8; anchors.verticalCenter: parent.verticalCenter }
+                                                }
+                                                Rectangle {
+                                                    visible: modelData.rx >= 0 && appRow.usage !== undefined
+                                                    width: 1; height: 10
+                                                    color: root.alpha(root.themeText, .25)
+                                                    anchors.verticalCenter: parent.verticalCenter
+                                                }
+                                                Row {
+                                                    visible: appRow.usage !== undefined
+                                                    spacing: 3
+                                                    Text { text: "Since boot"; color: root.themeLink; font.pixelSize: 8; anchors.verticalCenter: parent.verticalCenter }
+                                                    Image { source: Qt.resolvedUrl("../images/arrow-down.svg"); sourceSize.width: 8; sourceSize.height: 10; anchors.verticalCenter: parent.verticalCenter }
+                                                    Text { text: appRow.usage ? root.formatBytes(appRow.usage.rx) : ""; color: root.themeText; font.pixelSize: 8; font.bold: true; anchors.verticalCenter: parent.verticalCenter }
+                                                    Item { width: 4; height: 1 }
+                                                    Image { source: Qt.resolvedUrl("../images/arrow-up.svg"); sourceSize.width: 8; sourceSize.height: 10; anchors.verticalCenter: parent.verticalCenter }
+                                                    Text { text: appRow.usage ? root.formatBytes(appRow.usage.tx) : ""; color: root.themeText; font.pixelSize: 8; font.bold: true; anchors.verticalCenter: parent.verticalCenter }
+                                                }
+                                            }
                                             MouseArea {
                                                 anchors.fill: parent
+                                                enabled: !appRow.idle
                                                 cursorShape: Qt.PointingHandCursor
                                                 onClicked: root.toggleAppExpanded(appRow.appKey)
                                             }
@@ -2291,11 +2324,10 @@ font.pixelSize:13 }
                         }
                     }
                     Text {
-                        text: root.appRatesState === "ok" ? "Traffic: average download/upload over 3 s from the KDE System Monitor helper. Connections: Linux socket information."
-                            : root.appRatesState === "missing" ? "Traffic unavailable: KDE System Monitor helper (ksgrd_network_helper) not found."
-                            : root.appRatesState === "failed" ? "Traffic unavailable: KDE System Monitor helper could not start packet capture."
-                            : root.appRatesState === "nodata" ? "Traffic: no samples received from the KDE System Monitor helper."
-                            : "Connections: Linux socket information. Traffic: KDE System Monitor helper."
+                        text: root.appRatesState === "missing" || root.appUsageState === "missing" ? "Traffic unavailable: KDE System Monitor helper (ksgrd_network_helper) not found."
+                            : root.appRatesState === "failed" || root.appUsageState === "failed" ? "Traffic unavailable: KDE System Monitor helper could not start packet capture."
+                            : "Speed: 3-second sample. Since boot: counted while Plasma runs (from login), updated every 2 minutes"
+                              + (root.appUsageUpdated !== "" ? ", last at " + root.appUsageUpdated : "") + ". Source: KDE System Monitor helper."
                         color: root.themeSecondary
                         font.pixelSize: 8
                         Layout.fillWidth: true
