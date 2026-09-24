@@ -32,7 +32,13 @@ PlasmoidItem {
     property var appExpanded: ({})
     property string appTrafficStatus: "Ready"
     property string appRatesState: ""
-    property var appUsage: ({})
+    // Traffic per process name: since boot (apps), wall-clock hours (hours), 2-minute chunks of the
+    // last hour (recent) and the last time each name had traffic (seen). Saved with the boot id.
+    property var appStore: ({apps: {}, hours: {}, recent: [], seen: {}, start: 0})
+    property string appPeriod: "day"
+    property var appProcs: []
+    property var appRatesNow: ({state: "", rates: {}})
+    property string appPeriodSummary: ""
     property string appUsageBoot: ""
     property string appUsageState: ""
     property string appUsageUpdated: ""
@@ -133,6 +139,7 @@ PlasmoidItem {
         id: appSettings
         property string watchedDevicesJson: "[]"
         property string appUsageJson: ""
+        property string appPeriod: "day"
     }
 
     Plasmoid.icon: "/icon.png"
@@ -1362,14 +1369,23 @@ PlasmoidItem {
         return {state: "ok", rates: rates}
     }
 
+    // Process name -> application name. Processes of one application (Firefox content processes,
+    // WARP daemon and tray) end up in one row.
     function appDisplayName(name) {
         var n = String(name || "").trim()
-        if (n === "?") return "Unknown process"
-        if (n === "chrome") return "Chromium"
-        if (n === "telegram-deskto") return "Telegram Desktop"
-        if (n === "warp-taskbar") return "Cloudflare WARP"
-        if (n === "syncthing") return "Syncthing"
-        if (n === "wechat") return "WeChat"
+        var names = {
+            "?": "Ended processes",
+            "chrome": "Chromium", "chromium": "Chromium", "chromium-browse": "Chromium",
+            "firefox": "Firefox", "firefox-bin": "Firefox", "Web Content": "Firefox", "Isolated Web Co": "Firefox",
+            "Socket Process": "Firefox", "WebExtensions": "Firefox", "Privileged Cont": "Firefox",
+            "thunderbird": "Thunderbird", "thunderbird-bin": "Thunderbird",
+            "telegram-deskto": "Telegram Desktop", "Telegram": "Telegram Desktop",
+            "warp-taskbar": "Cloudflare WARP", "warp-svc": "Cloudflare WARP",
+            "riseup-vpn": "RiseupVPN", "syncthing": "Syncthing", "wechat": "WeChat",
+            "kdeconnectd": "KDE Connect", "plasmashell": "Plasma", "plasma-discover": "Discover",
+            "packagekitd": "PackageKit", "claude-desktop": "Claude"
+        }
+        if (names.hasOwnProperty(n)) return names[n]
         return n || "Unknown"
     }
 
@@ -1389,35 +1405,262 @@ PlasmoidItem {
         root.appUsageBoot = bootId
         var saved = null
         try { saved = JSON.parse(appSettings.appUsageJson || "null") } catch (e) { saved = null }
-        root.appUsage = saved && saved.boot === bootId && saved.apps ? saved.apps : ({})
+        saved = saved || {}
+        // Since-boot totals start from zero after a reboot; hours and recent chunks are wall-clock time and stay.
+        // start: when hourly counting began (first run of this version), so a short history is not taken for a full day
+        root.appStore = {
+            apps: saved.boot === bootId && saved.apps ? saved.apps : {},
+            hours: saved.hours || {},
+            recent: Array.isArray(saved.recent) ? saved.recent : [],
+            seen: saved.seen || {},
+            start: saved.start > 0 ? saved.start : Date.now()
+        }
+        root.appPeriod = ["hour", "day", "boot"].indexOf(appSettings.appPeriod) !== -1 ? appSettings.appPeriod : "day"
         root.saveAppUsage()
+        root.rebuildApps()
         // A short first chunk, so totals show up soon after Plasma starts
         root.startAppUsage(20)
     }
 
     function saveAppUsage() {
-        appSettings.appUsageJson = JSON.stringify({boot: root.appUsageBoot, apps: root.appUsage})
+        appSettings.appUsageJson = JSON.stringify({boot: root.appUsageBoot, apps: root.appStore.apps, hours: root.appStore.hours,
+                                                   recent: root.appStore.recent, seen: root.appStore.seen, start: root.appStore.start})
     }
 
-    // appusage.sh lines "<pid> <rx> <tx> <name>" added to the totals (a new object, so bindings update)
-    function mergeAppUsage(text) {
-        var next = {}
-        for (var k in root.appUsage)
-            if (root.appUsage.hasOwnProperty(k)) next[k] = {rx: root.appUsage[k].rx, tx: root.appUsage[k].tx}
+    function setAppPeriod(period) {
+        if (root.appPeriod === period) return
+        root.appPeriod = period
+        appSettings.appPeriod = period
+        root.rebuildApps()
+    }
+
+    // appusage.sh lines "<pid> <rx> <tx> <name>" -> bytes per process name in this chunk: {name: [rx, tx]}
+    function parseUsageChunk(text) {
+        var d = {}
         var lines = String(text || "").split("\n")
         for (var i = 0; i < lines.length; ++i) {
             var m = lines[i].match(/^(\d+) (\d+) (\d+) (.+)$/)
             if (!m) continue
-            if (!next[m[4]]) next[m[4]] = {rx: 0, tx: 0}
-            next[m[4]].rx += +m[2]
-            next[m[4]].tx += +m[3]
+            if (!d[m[4]]) d[m[4]] = [0, 0]
+            d[m[4]][0] += +m[2]
+            d[m[4]][1] += +m[3]
         }
+        return d
+    }
+
+    // Local wall-clock hour of a time stamp as "yyyyMMddHH"
+    function hourKey(ms) {
+        var t = new Date(ms)
+        function two(n) { return (n < 10 ? "0" : "") + n }
+        return String(t.getFullYear()) + two(t.getMonth() + 1) + two(t.getDate()) + two(t.getHours())
+    }
+
+    function hourStart(key) {
+        var k = String(key)
+        return new Date(+k.substring(0, 4), +k.substring(4, 6) - 1, +k.substring(6, 8), +k.substring(8, 10)).getTime()
+    }
+
+    // One chunk that ended at time t added to a copy of the store; hours older than 25 h,
+    // chunks older than 65 min and last-activity times older than 30 days are dropped
+    function addUsageChunk(store, d, t) {
+        var next = {apps: {}, hours: {}, recent: [], seen: {}, start: store.start || 0}
+        var k
+        for (k in store.apps) if (store.apps.hasOwnProperty(k)) next.apps[k] = {rx: store.apps[k].rx, tx: store.apps[k].tx}
+        for (k in store.seen) if (store.seen.hasOwnProperty(k) && store.seen[k] > t - 30 * 24 * 3600000) next.seen[k] = store.seen[k]
+        var oldest = t - 25 * 3600000
+        for (k in store.hours) {
+            if (!store.hours.hasOwnProperty(k) || root.hourStart(k) < oldest) continue
+            next.hours[k] = {}
+            for (var n in store.hours[k]) if (store.hours[k].hasOwnProperty(n)) next.hours[k][n] = store.hours[k][n].slice()
+        }
+        for (var r = 0; r < store.recent.length; ++r) if (store.recent[r].t > t - 65 * 60000) next.recent.push(store.recent[r])
+        var hk = root.hourKey(t)
+        if (!next.hours[hk]) next.hours[hk] = {}
+        var any = false
+        for (var name in d) {
+            if (!d.hasOwnProperty(name)) continue
+            var rx = d[name][0], tx = d[name][1]
+            if (rx + tx <= 0) continue
+            any = true
+            if (!next.apps[name]) next.apps[name] = {rx: 0, tx: 0}
+            next.apps[name].rx += rx
+            next.apps[name].tx += tx
+            if (!next.hours[hk][name]) next.hours[hk][name] = [0, 0]
+            next.hours[hk][name][0] += rx
+            next.hours[hk][name][1] += tx
+            // Keep-alive packets do not make an application "active"
+            if (rx + tx >= 2048) next.seen[name] = t
+        }
+        if (any) next.recent.push({t: t, d: d})
         return next
     }
 
-    function appUsageTotal(name) {
-        var u = root.appUsage[name]
-        return u ? u.rx + u.tx : 0
+    // Traffic per application (display name) in a period: {name: {rx, tx, seen}}
+    function periodUsage(store, period, now) {
+        var out = {}
+        function add(name, rx, tx) {
+            var key = root.appDisplayName(name)
+            if (!out[key]) out[key] = {rx: 0, tx: 0, seen: 0}
+            out[key].rx += rx
+            out[key].tx += tx
+            if ((store.seen[name] || 0) > out[key].seen) out[key].seen = store.seen[name]
+        }
+        var n
+        if (period === "boot") {
+            for (n in store.apps) if (store.apps.hasOwnProperty(n)) add(n, store.apps[n].rx, store.apps[n].tx)
+        } else if (period === "hour") {
+            for (var r = 0; r < store.recent.length; ++r) {
+                if (store.recent[r].t <= now - 3600000) continue
+                var d = store.recent[r].d
+                for (n in d) if (d.hasOwnProperty(n)) add(n, d[n][0], d[n][1])
+            }
+        } else {
+            // 24 hours: every hourly bucket that overlaps the last 24 hours
+            for (var k in store.hours) {
+                if (!store.hours.hasOwnProperty(k) || root.hourStart(k) + 3600000 <= now - 24 * 3600000) continue
+                for (n in store.hours[k]) if (store.hours[k].hasOwnProperty(n)) add(n, store.hours[k][n][0], store.hours[k][n][1])
+            }
+        }
+        return out
+    }
+
+    // Last activity per application (display name), whatever the period
+    function appLastSeen(store) {
+        var out = {}
+        for (var n in store.seen) {
+            if (!store.seen.hasOwnProperty(n)) continue
+            var key = root.appDisplayName(n)
+            if ((out[key] || 0) < store.seen[n]) out[key] = store.seen[n]
+        }
+        return out
+    }
+
+    // Connections of several processes: identical endpoints once, with their count
+    function mergeConnections(lists) {
+        var seen = {}
+        var all = []
+        for (var i = 0; i < lists.length; ++i) {
+            for (var j = 0; j < lists[i].length; ++j) {
+                var c = lists[i][j]
+                var id = c.protocol + "|" + c.address + "|" + c.port + "|" + c.state
+                if (seen.hasOwnProperty(id)) { seen[id].count += c.count || 1; continue }
+                seen[id] = {protocol: c.protocol, address: c.address, port: c.port, state: c.state, count: c.count || 1}
+                all.push(seen[id])
+            }
+        }
+        all.sort(function(a, b) {
+            if (a.protocol !== b.protocol) return a.protocol < b.protocol ? -1 : 1
+            if (a.address !== b.address) return a.address < b.address ? -1 : 1
+            var p = (Number(a.port) || 0) - (Number(b.port) || 0)
+            if (p !== 0) return p
+            return a.state === b.state ? 0 : (a.state < b.state ? -1 : 1)
+        })
+        return all.slice(0, 30)
+    }
+
+    // One row per application: processes with the same name together, traffic of the period,
+    // live speed from the 3-second sample. Leaders by traffic first, then who is busy right now,
+    // then who was active last.
+    function buildAppRows(procs, rates, usage, lastSeen) {
+        var groups = {}
+        function group(name) {
+            if (!groups[name]) groups[name] = {key: name, display: name, pids: [], tcp: 0, udp: 0, total: 0, lists: [], rx: -1, tx: -1, prx: 0, ptx: 0, seen: 0}
+            return groups[name]
+        }
+        for (var i = 0; i < procs.length; ++i) {
+            var p = procs[i]
+            var g = group(p.display)
+            g.pids.push(p.pid)
+            g.tcp += p.tcp
+            g.udp += p.udp
+            g.total += p.total
+            g.lists.push(p.connections)
+            if (rates.state === "ok") {
+                var rate = rates.rates[p.pid]
+                g.rx = Math.max(0, g.rx) + (rate ? rate.rx : 0)
+                g.tx = Math.max(0, g.tx) + (rate ? rate.tx : 0)
+            }
+        }
+        for (var name in usage) {
+            if (!usage.hasOwnProperty(name)) continue
+            var u = usage[name]
+            if (u.rx + u.tx <= 0 && !groups[name]) continue
+            var gu = group(name)
+            gu.prx = u.rx
+            gu.ptx = u.tx
+            gu.seen = u.seen
+        }
+        var rows = []
+        for (var k in groups) {
+            if (!groups.hasOwnProperty(k)) continue
+            var r = groups[k]
+            if (lastSeen && (lastSeen[r.display] || 0) > r.seen) r.seen = lastSeen[r.display]
+            r.pids.sort(function(a, b) { return Number(a) - Number(b) })
+            r.connections = root.mergeConnections(r.lists)
+            delete r.lists
+            rows.push(r)
+        }
+        rows.sort(function(a, b) {
+            var d = (b.prx + b.ptx) - (a.prx + a.ptx)
+            if (d !== 0) return d
+            d = (Math.max(0, b.rx) + Math.max(0, b.tx)) - (Math.max(0, a.rx) + Math.max(0, a.tx))
+            if (d !== 0) return d
+            if (b.seen !== a.seen) return b.seen - a.seen
+            if (b.total !== a.total) return b.total - a.total
+            return a.display.localeCompare(b.display)
+        })
+        var lead = rows.length ? rows[0].prx + rows[0].ptx : 0
+        for (var j = 0; j < rows.length; ++j) rows[j].share = lead > 0 ? (rows[j].prx + rows[j].ptx) / lead : 0
+        return rows.slice(0, 30)
+    }
+
+    function rebuildApps() {
+        var now = Date.now()
+        var usage = root.periodUsage(root.appStore, root.appPeriod, now)
+        var rows = root.buildAppRows(root.appProcs, root.appRatesNow, usage, root.appLastSeen(root.appStore))
+        var rx = 0, tx = 0, count = 0
+        for (var n in usage) if (usage.hasOwnProperty(n) && usage[n].rx + usage[n].tx > 0) { rx += usage[n].rx; tx += usage[n].tx; count++ }
+        var title = root.appPeriod === "hour" ? "Last hour" : (root.appPeriod === "boot" ? "Since boot" : "Last 24 hours")
+        var span = root.appPeriod === "hour" ? 3600000 : (root.appPeriod === "day" ? 24 * 3600000 : 0)
+        if (span && root.appStore.start > now - span) title += " (counted since " + root.clockText(root.appStore.start, now) + ")"
+        root.appPeriodSummary = count ? title + ": ↓ " + root.formatBytes(rx) + "  ↑ " + root.formatBytes(tx) + " · " + count + " app" + (count === 1 ? "" : "s")
+                                      : title + ": no traffic counted yet"
+        var present = {}
+        for (var i = 0; i < rows.length; ++i) present[rows[i].key] = true
+        var kept = {}
+        var pruned = false
+        for (var k in root.appExpanded) {
+            if (!root.appExpanded.hasOwnProperty(k)) continue
+            if (present[k]) kept[k] = true
+            else pruned = true
+        }
+        if (pruned) root.appExpanded = kept
+        // Replace the model in one step, and only when something changed
+        if (JSON.stringify(rows) !== JSON.stringify(root.appTraffic)) root.appTraffic = rows
+    }
+
+    // "14:05" today, "23 Sep 22:05" on another day
+    function clockText(ms, now) {
+        var t = new Date(ms)
+        function two(n) { return (n < 10 ? "0" : "") + n }
+        var hm = two(t.getHours()) + ":" + two(t.getMinutes())
+        if (t.toDateString() === new Date(now).toDateString()) return hm
+        var months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+        return t.getDate() + " " + months[t.getMonth()] + " " + hm
+    }
+
+    // "last active 14:05" while the application is idle; empty while it is busy (the speed is shown then)
+    function appActivity(row, now) {
+        if (row.rx > 0 || row.tx > 0) return ""
+        if (!row.seen) return ""
+        return "last active " + root.clockText(row.seen, now)
+    }
+
+    // Detail line of an application that is connected but moved no data in the period
+    function appIdleText(row, period, now) {
+        var when = period === "hour" ? "in the last hour" : (period === "boot" ? "since boot" : "in the last 24 hours")
+        var last = root.appActivity(row, now)
+        return "No traffic " + when + (last !== "" ? " · " + last : "")
     }
 
     function runSpeedTest() {
@@ -1711,9 +1954,10 @@ PlasmoidItem {
             // A chunk that ended far too early is not trusted and retried later instead of spinning
             if (ran < root.appUsageChunkSecs / 2) { appUsageRetry.start(); return }
             root.appUsageState = "ok"
-            root.appUsage = root.mergeAppUsage(out)
+            root.appStore = root.addUsageChunk(root.appStore, root.parseUsageChunk(out), Date.now())
             root.appUsageUpdated = Qt.formatTime(new Date(), "HH:mm")
             root.saveAppUsage()
+            root.rebuildApps()
             Qt.callLater(function() { root.startAppUsage(120) })
         }
     }
@@ -1735,42 +1979,13 @@ PlasmoidItem {
         }
         var rates = root.parseAppRates(cut >= 0 ? out.substring(cut) : "")
         root.appRatesState = rates.state
-        for (var r = 0; r < rows.length; ++r) {
-            var rate = rates.rates[rows[r].pid]
-            rows[r].rx = rates.state === "ok" ? (rate ? rate.rx : 0) : -1
-            rows[r].tx = rates.state === "ok" ? (rate ? rate.tx : 0) : -1
-        }
-        // Busiest applications since boot first; applications without connections now keep their totals too
-        rows.sort(function(a, b) {
-            var d = root.appUsageTotal(b.process) - root.appUsageTotal(a.process)
-            if (d !== 0) return d
-            if (b.total !== a.total) return b.total - a.total
-            var n = a.process.localeCompare(b.process)
-            return n !== 0 ? n : Number(a.pid) - Number(b.pid)
-        })
+        root.appProcs = rows
+        root.appRatesNow = rates
+        root.rebuildApps()
         var connected = {}
-        for (var c = 0; c < rows.length; ++c) connected[rows[c].process] = true
-        var idle = []
-        for (var name in root.appUsage) {
-            if (!root.appUsage.hasOwnProperty(name) || connected[name] || root.appUsageTotal(name) <= 0) continue
-            idle.push({process: name, pid: "", tcp: 0, udp: 0, total: 0, connections: [], display: root.appDisplayName(name), rx: -1, tx: -1, idle: true})
-        }
-        idle.sort(function(a, b) { return root.appUsageTotal(b.process) - root.appUsageTotal(a.process) })
-        var shown = rows.slice(0, 20)
-        shown = shown.concat(idle.slice(0, Math.max(0, 20 - shown.length)))
-        var present = {}
-        for (var i = 0; i < shown.length; ++i) present[shown[i].process + "|" + shown[i].pid] = true
-        var kept = {}
-        var pruned = false
-        for (var k in root.appExpanded) {
-            if (!root.appExpanded.hasOwnProperty(k)) continue
-            if (present[k]) kept[k] = true
-            else pruned = true
-        }
-        if (pruned) root.appExpanded = kept
-        // Replace the model in one step, and only when the data really changed
-        if (JSON.stringify(shown) !== JSON.stringify(root.appTraffic)) root.appTraffic = shown
-        root.appTrafficStatus = rows.length ? (rows.length + " active app" + (rows.length === 1 ? "" : "s") + " · " + Qt.formatTime(new Date(), "HH:mm:ss")) : "No active connections"
+        var apps = 0
+        for (var i = 0; i < rows.length; ++i) if (!connected[rows[i].display]) { connected[rows[i].display] = true; apps++ }
+        root.appTrafficStatus = (apps ? apps + " connected now" : "No connections now") + " · " + Qt.formatTime(new Date(), "HH:mm:ss")
         root.appTrafficLoading = false
     } }
     Plasma5Support.DataSource { id: dependencyApi; engine:"executable"; onNewData:function(source,data){dependencyApi.disconnectSource(source);var out=String(data.stdout||"").trim();root.missingDependencies=out.replace(/^\s+|\s+$/g,"").replace(/\n+/g," ");var pkgs=root.missingDependencies.trim().split(/\s+/).filter(function(x){return x});root.installCommand=pkgs.length?"sudo apt install "+pkgs.join(" "):"";root.dependenciesLoading=false} }
@@ -2318,7 +2533,7 @@ font.pixelSize:13 }
                             spacing: 5
                             Image { source: Qt.resolvedUrl("../images/github.svg"); sourceSize.width: 18; sourceSize.height: 18; Layout.preferredWidth: 18; Layout.preferredHeight: 18 }
                             Text { text: "GitHub"; color: root.themeLink; font.pixelSize: 13; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: Qt.openUrlExternally("https://github.com/f1devbin") } }
-                            Text { text: "· v6.1.42"; color: root.themeSecondary; font.pixelSize: 10 }
+                            Text { text: "· v6.1.43"; color: root.themeSecondary; font.pixelSize: 10 }
                             Item { Layout.fillWidth: true }
                         }
                     }
@@ -3229,122 +3444,177 @@ font.pixelSize:13 }
                         Text { text: "Network Apps"; color: root.themeText; font.pixelSize: 13; font.bold: true; Layout.fillWidth: true }
                         Text { text: root.appTrafficLoading ? "Reading…" : root.appTrafficStatus; color: root.appTrafficLoading ? root.themeHighlight : root.themeSecondary; font.pixelSize: 9 }
                     }
+                    // Period of the ranking
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 5
+                        Repeater {
+                            model: [{key: "hour", title: "Last hour"}, {key: "day", title: "24 hours"}, {key: "boot", title: "Since boot"}]
+                            delegate: Controls.Button {
+                                id: periodButton
+                                readonly property bool current: root.appPeriod === modelData.key
+                                Layout.fillWidth: true
+                                Layout.preferredWidth: 1    // equal widths, also when the current one is bold
+                                Layout.preferredHeight: 28
+                                text: modelData.title
+                                onClicked: root.setAppPeriod(modelData.key)
+                                background: Rectangle {
+                                    radius: 5
+                                    color: periodButton.current ? root.alpha(root.themeHighlight, .18) : root.alpha(root.themeBackground, .80)
+                                    border.width: 1
+                                    border.color: periodButton.current ? root.themeHighlight : root.alpha(root.themeText, .12)
+                                }
+                                contentItem: Text {
+                                    text: periodButton.text
+                                    color: root.themeText
+                                    font.pixelSize: 10
+                                    font.bold: periodButton.current
+                                    horizontalAlignment: Text.AlignHCenter
+                                    verticalAlignment: Text.AlignVCenter
+                                }
+                            }
+                        }
+                    }
                     Text {
-                        text: "Applications with active network connections · TCP and UDP"
-                        color: root.themeSecondary
+                        text: root.appPeriodSummary
+                        color: root.themeText
                         font.pixelSize: 10
                         Layout.fillWidth: true
                         wrapMode: Text.Wrap
                     }
-                    Rectangle {
-                        Layout.fillWidth: true
-                        Layout.preferredHeight: 28
-                        radius: 6
-                        color: root.alpha(root.themeText, .035)
-                        border.width: 1
-                        border.color: root.alpha(root.themeText, .08)
-                        RowLayout {
-                            anchors.fill: parent
-                            anchors.leftMargin: 8; anchors.rightMargin: 8
-                            Text { text: "Application"; color: root.themeSecondary; font.pixelSize: 9; Layout.fillWidth: true }
-                            Text { text: "TCP"; color: root.themeSecondary; font.pixelSize: 9; Layout.preferredWidth: 42; horizontalAlignment: Text.AlignRight }
-                            Text { text: "UDP"; color: root.themeSecondary; font.pixelSize: 9; Layout.preferredWidth: 42; horizontalAlignment: Text.AlignRight }
-                            Text { text: "Total"; color: root.themeSecondary; font.pixelSize: 9; Layout.preferredWidth: 48; horizontalAlignment: Text.AlignRight }
-                        }
-                    }
                     Flickable {
+                        id: appFlick
                         Layout.fillWidth: true
                         Layout.fillHeight: true
                         clip: true
+                        contentWidth: width
                         contentHeight: appTrafficColumn.height
+                        interactive: contentHeight > height
                         boundsBehavior: Flickable.StopAtBounds
+                        Controls.ScrollBar.vertical: Controls.ScrollBar {
+                            policy: Controls.ScrollBar.AlwaysOn
+                            visible: appFlick.contentHeight > appFlick.height + 1
+                        }
                         Column {
                             id: appTrafficColumn
-                            width: parent.width
+                            width: parent.width - (appFlick.contentHeight > appFlick.height + 1 ? 10 : 0)
                             spacing: 4
                             Repeater {
                                 model: root.appTraffic
                                 delegate: Rectangle {
                                     id: appRow
-                                    // Expanded state lives in root.appExpanded (key process|pid), so it survives model updates
-                                    readonly property string appKey: modelData ? String(modelData.process) + "|" + String(modelData.pid) : ""
+                                    // Expanded state lives in root.appExpanded (key: application name), so it survives updates
+                                    readonly property string appKey: modelData ? String(modelData.key) : ""
                                     readonly property bool expanded: root.appExpanded[appKey] === true
-                                    // No connections now, listed only for its traffic since boot
-                                    readonly property bool idle: modelData ? modelData.idle === true : false
-                                    readonly property var usage: modelData ? root.appUsage[modelData.process] : undefined
+                                    readonly property real periodTotal: modelData ? modelData.prx + modelData.ptx : 0
+                                    readonly property bool live: modelData ? (modelData.rx > 0 || modelData.tx > 0) : false
+                                    readonly property string lastActive: modelData ? root.appActivity(modelData, Date.now()) : ""
                                     width: appTrafficColumn.width
-                                    height: appRowContent.implicitHeight + (expanded ? 6 : 0)
+                                    height: appRowContent.implicitHeight + 12
                                     radius: 6
                                     color: root.alpha(root.themeText, .045)
                                     border.width: 1
                                     border.color: root.alpha(root.themeText, .07)
                                     Column {
                                         id: appRowContent
-                                        width: parent.width
+                                        x: 8
+                                        y: 6
+                                        width: parent.width - 16
                                         spacing: 4
                                         Item {
                                             width: parent.width
-                                            height: 46
-                                            RowLayout {
-                                                anchors.left: parent.left
-                                                anchors.right: parent.right
-                                                anchors.rightMargin: 8
-                                                anchors.top: parent.top
-                                                anchors.topMargin: 4
-                                                height: 20
-                                                Text { text: appRow.idle ? "" : (appRow.expanded ? "⌄" : "›"); color: root.themeSecondary; font.pixelSize: 14; Layout.preferredWidth: 22; horizontalAlignment: Text.AlignHCenter }
-                                                Text { text: modelData.display; color: root.themeText; opacity: appRow.idle ? 0.85 : 1; font.pixelSize: 10; font.bold: true; elide: Text.ElideRight; Layout.fillWidth: true }
-                                                Text { text: appRow.idle ? "not connected" : "PID " + modelData.pid; color: root.themeSecondary; font.pixelSize: 9; Layout.preferredWidth: 62; horizontalAlignment: Text.AlignRight }
-                                                Text { text: modelData.tcp; color: root.themeText; font.pixelSize: 9; Layout.preferredWidth: 42; horizontalAlignment: Text.AlignRight }
-                                                Text { text: modelData.udp; color: root.themeText; font.pixelSize: 9; Layout.preferredWidth: 42; horizontalAlignment: Text.AlignRight }
-                                                Text { text: modelData.total; color: root.themeText; font.pixelSize: 9; Layout.preferredWidth: 48; horizontalAlignment: Text.AlignRight }
-                                            }
-                                            // Second line: current speed (3 s sample) and traffic since boot
-                                            Row {
-                                                x: 27
-                                                y: 26
+                                            height: appHead.implicitHeight
+                                            Column {
+                                                id: appHead
+                                                width: parent.width
                                                 spacing: 4
-                                                Row {
-                                                    visible: modelData.rx >= 0
-                                                    spacing: 3
-                                                    Image { source: Qt.resolvedUrl("../images/arrow-down.svg"); sourceSize.width: 8; sourceSize.height: 10; anchors.verticalCenter: parent.verticalCenter }
-                                                    Text { text: root.formatBytes(modelData.rx) + "/s"; color: root.themeText; font.pixelSize: 9; anchors.verticalCenter: parent.verticalCenter }
-                                                    Item { width: 4; height: 1 }
-                                                    Image { source: Qt.resolvedUrl("../images/arrow-up.svg"); sourceSize.width: 8; sourceSize.height: 10; anchors.verticalCenter: parent.verticalCenter }
-                                                    Text { text: root.formatBytes(modelData.tx) + "/s"; color: root.themeText; font.pixelSize: 9; anchors.verticalCenter: parent.verticalCenter }
+                                                RowLayout {
+                                                    width: parent.width
+                                                    spacing: 6
+                                                    // Place in the ranking only for applications with traffic in the period
+                                                    Text { text: appRow.periodTotal > 0 ? index + 1 : ""; color: root.themeSecondary; font.pixelSize: 10; font.bold: true; Layout.preferredWidth: 16; horizontalAlignment: Text.AlignRight }
+                                                    Text { text: modelData.display; color: root.themeText; font.pixelSize: 11; font.bold: true; elide: Text.ElideRight; Layout.fillWidth: true }
+                                                    Text { text: appRow.periodTotal > 0 ? root.formatBytes(appRow.periodTotal) : "—"; color: root.themeText; font.pixelSize: 11; font.bold: true }
+                                                    Text { text: appRow.expanded ? "⌄" : "›"; color: root.themeSecondary; font.pixelSize: 14; Layout.preferredWidth: 12; horizontalAlignment: Text.AlignHCenter }
                                                 }
-                                                Rectangle {
-                                                    visible: modelData.rx >= 0 && appRow.usage !== undefined
-                                                    width: 1; height: 10
-                                                    color: root.alpha(root.themeText, .25)
-                                                    anchors.verticalCenter: parent.verticalCenter
+                                                // Share of the leader: received (blue) and sent (red)
+                                                Item {
+                                                    visible: appRow.periodTotal > 0
+                                                    x: 22
+                                                    width: parent.width - 22 - 18
+                                                    height: 5
+                                                    Rectangle { anchors.fill: parent; radius: 2.5; color: root.alpha(root.themeText, .08) }
+                                                    Rectangle {
+                                                        id: rxBar
+                                                        width: appRow.periodTotal > 0 ? parent.width * modelData.share * modelData.prx / appRow.periodTotal : 0
+                                                        height: parent.height
+                                                        radius: 2.5
+                                                        color: "#69a9ff"
+                                                    }
+                                                    Rectangle {
+                                                        x: rxBar.width
+                                                        width: appRow.periodTotal > 0 ? parent.width * modelData.share * modelData.ptx / appRow.periodTotal : 0
+                                                        height: parent.height
+                                                        radius: 2.5
+                                                        color: "#ff4040"
+                                                    }
                                                 }
+                                                // Received / sent in the period, then speed right now or the last activity
                                                 Row {
-                                                    visible: appRow.usage !== undefined
-                                                    spacing: 3
-                                                    Text { text: "Since boot"; color: root.themeLink; font.pixelSize: 9; anchors.verticalCenter: parent.verticalCenter }
+                                                    visible: appRow.periodTotal > 0
+                                                    x: 22
+                                                    spacing: 4
                                                     Image { source: Qt.resolvedUrl("../images/arrow-down.svg"); sourceSize.width: 8; sourceSize.height: 10; anchors.verticalCenter: parent.verticalCenter }
-                                                    Text { text: appRow.usage ? root.formatBytes(appRow.usage.rx) : ""; color: root.themeText; font.pixelSize: 9; font.bold: true; anchors.verticalCenter: parent.verticalCenter }
-                                                    Item { width: 4; height: 1 }
+                                                    Text { text: root.formatBytes(modelData.prx); color: root.themeText; font.pixelSize: 10; anchors.verticalCenter: parent.verticalCenter }
+                                                    Item { width: 3; height: 1 }
                                                     Image { source: Qt.resolvedUrl("../images/arrow-up.svg"); sourceSize.width: 8; sourceSize.height: 10; anchors.verticalCenter: parent.verticalCenter }
-                                                    Text { text: appRow.usage ? root.formatBytes(appRow.usage.tx) : ""; color: root.themeText; font.pixelSize: 9; font.bold: true; anchors.verticalCenter: parent.verticalCenter }
+                                                    Text { text: root.formatBytes(modelData.ptx); color: root.themeText; font.pixelSize: 10; anchors.verticalCenter: parent.verticalCenter }
+                                                    Text {
+                                                        visible: text !== ""
+                                                        text: appRow.live ? "· now ↓ " + root.formatBytes(modelData.rx) + "/s  ↑ " + root.formatBytes(modelData.tx) + "/s"
+                                                            : (appRow.lastActive !== "" ? "· " + appRow.lastActive : "")
+                                                        color: appRow.live ? root.themePositive : root.themeSecondary
+                                                        font.pixelSize: 10
+                                                        anchors.verticalCenter: parent.verticalCenter
+                                                    }
+                                                }
+                                                // Connected, but nothing counted in the period (yet)
+                                                Text {
+                                                    visible: appRow.periodTotal <= 0
+                                                    x: 22
+                                                    width: parent.width - 22
+                                                    text: appRow.live ? "now ↓ " + root.formatBytes(modelData.rx) + "/s  ↑ " + root.formatBytes(modelData.tx) + "/s · not counted yet"
+                                                        : root.appIdleText(modelData, root.appPeriod, Date.now())
+                                                    color: appRow.live ? root.themePositive : root.themeSecondary
+                                                    font.pixelSize: 10
+                                                    elide: Text.ElideRight
                                                 }
                                             }
                                             MouseArea {
                                                 anchors.fill: parent
-                                                enabled: !appRow.idle
                                                 cursorShape: Qt.PointingHandCursor
                                                 onClicked: root.toggleAppExpanded(appRow.appKey)
                                             }
                                         }
-                                        Rectangle { visible: appRow.expanded; width: parent.width - 16; x: 8; height: 1; color: root.alpha(root.themeText, .08) }
+                                        Rectangle { visible: appRow.expanded; width: parent.width; height: 1; color: root.alpha(root.themeText, .08) }
                                         Column {
                                             visible: appRow.expanded
-                                            width: parent.width - 16
-                                            x: 8
+                                            width: parent.width
                                             spacing: 2
+                                            Text {
+                                                width: parent.width
+                                                text: modelData.pids.length
+                                                    ? (modelData.pids.length === 1 ? "PID " + modelData.pids[0] : modelData.pids.length + " processes · PID " + modelData.pids.join(", "))
+                                                      + " · " + modelData.tcp + " TCP · " + modelData.udp + " UDP"
+                                                    : "No connections at the moment"
+                                                color: root.themeSecondary
+                                                font.pixelSize: 10
+                                                wrapMode: Text.Wrap
+                                            }
                                             Row {
-                                                width: parent.width; height: 18
+                                                visible: modelData.connections.length > 0
+                                                width: parent.width
+                                                height: 18
                                                 Text { text: "Protocol"; color: root.themeSecondary; font.pixelSize: 9; width: 52 }
                                                 Text { text: "Remote address"; color: root.themeSecondary; font.pixelSize: 9; width: parent.width - 52 - 72 - 86 }
                                                 Text { text: "Port"; color: root.themeSecondary; font.pixelSize: 9; width: 72; horizontalAlignment: Text.AlignRight }
@@ -3353,7 +3623,8 @@ font.pixelSize:13 }
                                             Repeater {
                                                 model: modelData.connections
                                                 delegate: Row {
-                                                    width: parent.width; height: 22
+                                                    width: parent.width
+                                                    height: 22
                                                     Text { text: modelData.protocol; color: root.themeText; font.pixelSize: 9; width: 52 }
                                                     // "×N": N connections to this address and port
                                                     Item {
@@ -3391,8 +3662,8 @@ font.pixelSize:13 }
                     Text {
                         text: root.appRatesState === "missing" || root.appUsageState === "missing" ? "Traffic unavailable: KDE System Monitor helper (ksgrd_network_helper) not found."
                             : root.appRatesState === "failed" || root.appUsageState === "failed" ? "Traffic unavailable: KDE System Monitor helper could not start packet capture."
-                            : "Speed: 3-second sample. Since boot: counted while Plasma runs (from login), updated every 2 minutes"
-                              + (root.appUsageUpdated !== "" ? ", last at " + root.appUsageUpdated : "") + ". Source: KDE System Monitor helper."
+                            : "Counted while Plasma runs (from login), updated every 2 minutes" + (root.appUsageUpdated !== "" ? ", last at " + root.appUsageUpdated : "")
+                              + ". \"now\" is a 3-second sample. Source: KDE System Monitor helper."
                         color: root.themeSecondary
                         font.pixelSize: 9
                         Layout.fillWidth: true

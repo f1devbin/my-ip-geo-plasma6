@@ -1,12 +1,17 @@
 # My IP & Geo
 
-Version 6.1.42
+Version 6.1.43
 
 Compact KDE Plasma 6 widget for public IP/geolocation, local network information and network tools.
 
 ## Requirements
 - KDE Plasma 6 (tested on Kubuntu 26.04). Nothing to install and no root rights: the widget uses `curl`, `ip`, `ping`, `ss` and standard shell tools, all present on Kubuntu by default.
 - Used when present, never required: `iw` or NetworkManager (Wi-Fi details), `resolvectl` (DNS servers), `notify-send` (notifications, D-Bus is used otherwise), KDE System Monitor's `ksgrd_network_helper` (per-application traffic).
+
+## v6.1.43
+- Network Apps opens with the traffic leaders. One row per application: processes with the same name (three `curl`, Firefox's content processes, `warp-svc` + `warp-taskbar`) are one row with their speeds and connections added up; the expanded row lists the PIDs.
+- Ranking by traffic in a period: Last hour, 24 hours (default) or Since boot; the choice is remembered. With equal traffic the application that is busy right now comes first, then the one that was active last. Each row shows its place, the total, a bar relative to the leader (blue received, red sent), ↓/↑ for the period and the current speed ("now", green) or the last activity ("last active 14:05"). Applications that are connected now but moved nothing in the period are listed below without a place ("No traffic in the last hour · last active 09:00"). A line above the list shows the period total and the number of applications. Up to 30 rows (was 20).
+- Traffic is also kept per clock hour for the last 25 hours, so "Last hour" and "24 hours" survive Plasma restarts and reboots; "Since boot" starts from zero after a reboot as before. Hourly counting starts with this version: until a full period is counted, the line above the list says since when ("Last 24 hours (counted since 09:05)"). Activity means at least 2 KB in a 2-minute chunk, keep-alive packets do not count.
 
 ## v6.1.42
 - A stretched widget uses its space: the Tools panel fills the whole widget (it was limited to 470×560 and the main view showed around it), the Public IP rows stay together at the top instead of spreading over the height, and the speed gauge is centred in a tall panel.
