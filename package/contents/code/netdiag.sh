@@ -163,6 +163,8 @@ check_link() {
         iface_info "$dev"
     done
     vpn_ifaces | sed 's/^/VPN /'
+    # Process names are readable for everyone: a running VPN application names the tunnel
+    cat /proc/[0-9]*/comm 2>/dev/null | sort -u | grep -Ex 'riseup-vpn|calyx-vpn|bitmask|mullvad-daemon|nordvpnd|expressvpnd|windscribe|protonvpn-app|protonvpn|AmneziaVPN|amnezia-vpn|hiddify|openconnect|openfortivpn' | sed 's/^/VPNAPP /'
     if have nmcli; then
         nmcli -t -f CONNECTIVITY general 2>/dev/null | head -n 1 | sed 's/^/NMCONN /'
         nmcli -t -f DEVICE,NAME connection show --active 2>/dev/null | sed 's/^/NMACTIVE /'
@@ -216,10 +218,12 @@ check_internet() {
 
 check_web() {
     curl -s -o /dev/null --max-time 5 -w 'PORTAL %{http_code} %{redirect_url}\n' "$PORTAL_URL" > "$tmp/portal" 2>/dev/null &
+    # The same request over IPv4 only: a much slower connect above means failed IPv6 attempts first
+    curl -4 -s -o /dev/null --max-time 8 -w 'WEB4 %{http_code} %{time_namelookup} %{time_connect} %{time_appconnect} %{time_starttransfer} %{time_total} %{remote_ip}\n' "$TRACE_URL" > "$tmp/web4" 2>/dev/null &
     curl -sS --max-time 8 -o "$tmp/trace" -w 'WEB %{http_code} %{time_namelookup} %{time_connect} %{time_appconnect} %{time_starttransfer} %{time_total} %{remote_ip}\n' "$TRACE_URL" > "$tmp/web" 2> "$tmp/err"
     echo "WEBRC $?"
     wait
-    cat "$tmp/web" "$tmp/portal"
+    cat "$tmp/web" "$tmp/web4" "$tmp/portal"
     head -n 1 "$tmp/err" | sed 's/^/WEBERR /'
     grep -Es '^(ip|loc|colo|warp|tls|http)=' "$tmp/trace" | head -n 8 | sed 's/^/TRACE /'
     have timedatectl && timedatectl show -p NTPSynchronized --value 2>/dev/null | head -n 1 | sed 's/^/NTP /'

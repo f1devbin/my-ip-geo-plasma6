@@ -668,7 +668,7 @@ PlasmoidItem {
     }
 
     function parseDiagLink(text) {
-        var r = {routes4: [], routes6: [], egress: null, ifaces: {}, order: [], vpns: [], nm: "", nmNames: {}}
+        var r = {routes4: [], routes6: [], egress: null, ifaces: {}, order: [], vpns: [], nm: "", nmNames: {}, apps: []}
         function iface(dev) {
             if (!r.ifaces[dev]) {
                 r.ifaces[dev] = {dev: dev, kind: "other", devtype: "", mtu: 0, speed: -1, duplex: "", mac: "", addrs: [], addrs6: [], wifi: null}
@@ -727,6 +727,7 @@ PlasmoidItem {
                 if (pw.dbm === null) pw.dbm = +m[2]
             } else if ((m = line.match(/^VPN (\S+) (\S+)(?: (\S+))?/))) r.vpns.push({dev: m[1], kind: m[2], type: m[3] || ""})
             else if ((m = line.match(/^NMCONN (\S+)/))) r.nm = m[1]
+            else if ((m = line.match(/^VPNAPP (\S+)/))) r.apps.push(m[1])
             else if ((m = line.match(/^NMACTIVE (.*)$/))) {
                 // DEVICE:NAME of active NetworkManager connections
                 var nf = root.splitTerse(m[1])
@@ -785,13 +786,15 @@ PlasmoidItem {
 
     function parseDiagWeb(text) {
         var t = String(text || "")
-        var r = {rc: -1, code: 0, dns: 0, connect: 0, tls: 0, ttfb: 0, total: 0, ip: "", portal: 0, portalTo: "", err: "", trace: {}, ntp: ""}
+        var r = {rc: -1, code: 0, dns: 0, connect: 0, tls: 0, ttfb: 0, total: 0, ip: "", portal: 0, portalTo: "", err: "", trace: {}, ntp: "", v4: null}
         var m
         if ((m = t.match(/^WEBRC (\d+)/m))) r.rc = +m[1]
         if ((m = t.match(/^WEB (\d+) ([\d.]+) ([\d.]+) ([\d.]+) ([\d.]+) ([\d.]+) ?(\S*)/m))) {
             r.code = +m[1]; r.dns = parseFloat(m[2]); r.connect = parseFloat(m[3]); r.tls = parseFloat(m[4])
             r.ttfb = parseFloat(m[5]); r.total = parseFloat(m[6]); r.ip = m[7]
         }
+        if ((m = t.match(/^WEB4 (\d+) ([\d.]+) ([\d.]+) ([\d.]+) ([\d.]+) ([\d.]+) ?(\S*)/m)))
+            r.v4 = {code: +m[1], dns: parseFloat(m[2]), connect: parseFloat(m[3]), tls: parseFloat(m[4]), ttfb: parseFloat(m[5]), total: parseFloat(m[6]), ip: m[7]}
         if ((m = t.match(/^PORTAL (\d+) ?(\S*)/m))) { r.portal = +m[1]; r.portalTo = m[2] }
         if ((m = t.match(/^WEBERR (?:curl: \(\d+\) )?(.+)$/m))) r.err = m[1].trim()
         var re = /^TRACE (\w+)=(.*)$/gm
@@ -842,7 +845,7 @@ PlasmoidItem {
             var m
             if ((m = lines[i].match(/^HOP (\d+) (\S+) (\S+) ([012])/))) hops.push({ttl: +m[1], ip: m[2], rtt: m[3] === "-" ? -1 : parseFloat(m[3]), reached: +m[4], name: ""})
             else if ((m = lines[i].match(/^RTT (\S+) ([\d.]+)/))) rtt[m[1]] = parseFloat(m[2])
-            else if ((m = lines[i].match(/^NAME (\S+) (\S+)/))) names[m[1]] = m[2]
+            else if ((m = lines[i].match(/^NAME (\S+) (\S+)/)) && m[2].charAt(0) !== "_") names[m[1]] = m[2]
         }
         hops.sort(function(a, b) { return a.ttl - b.ttl })
         // Trailing hops without an answer are shown as one "*" row
@@ -885,13 +888,22 @@ PlasmoidItem {
         return fallback
     }
 
-    function diagVpnName(v, nmNames) {
+    function diagVpnName(v, nmNames, apps) {
         if (v.dev === "CloudflareWARP") return "Cloudflare WARP"
         if (/^tailscale/.test(v.dev)) return "Tailscale"
         if (v.dev === "nordlynx") return "NordVPN"
         if (/^proton/.test(v.dev)) return "Proton VPN"
         // A VPN set up in NetworkManager keeps its own name
         if (nmNames && nmNames[v.dev] && nmNames[v.dev] !== v.dev) return nmNames[v.dev]
+        // A plain tunnel: named after the VPN application that runs (first match wins)
+        var known = [["riseup-vpn", "RiseupVPN"], ["calyx-vpn", "CalyxVPN"], ["bitmask", "Bitmask"], ["mullvad-daemon", "Mullvad"],
+                     ["nordvpnd", "NordVPN"], ["expressvpnd", "ExpressVPN"], ["windscribe", "Windscribe"], ["protonvpn-app", "Proton VPN"],
+                     ["protonvpn", "Proton VPN"], ["AmneziaVPN", "Amnezia VPN"], ["amnezia-vpn", "Amnezia VPN"], ["hiddify", "Hiddify"],
+                     ["openconnect", "OpenConnect"], ["openfortivpn", "FortiClient VPN"]]
+        if (apps && v.type !== "wireguard" && v.type !== "ppp") {
+            for (var k = 0; k < known.length; ++k)
+                if (apps.indexOf(known[k][0]) !== -1) return known[k][1] + " · " + v.dev
+        }
         if (v.type === "wireguard") return "WireGuard · " + v.dev
         if (v.type === "openvpn") return "OpenVPN · " + v.dev
         if (v.type === "ppp") return "PPP · " + v.dev
@@ -963,10 +975,11 @@ PlasmoidItem {
                 s1.status = "ok"
                 if (main.kind === "wifi") {
                     var w = main.wifi || {ssid: "", freq: 0, dbm: null, signal: -1, rate: 0, chan: ""}
-                    var q = w.dbm !== null ? root.wifiQuality(w.dbm) : w.signal
+                    // Same percentage as the network applet when NetworkManager reports one
+                    var q = w.signal >= 0 ? w.signal : (w.dbm !== null ? root.wifiQuality(w.dbm) : -1)
                     s1.value = "Wi-Fi" + (q >= 0 ? " " + q + "%" : "")
                     if (w.ssid) parts.push("“" + w.ssid + "”")
-                    if (w.freq > 0) parts.push(w.freq >= 5925 ? "6 GHz" : (w.freq >= 4900 ? "5 GHz" : "2.4 GHz"))
+                    if (w.freq > 0) parts.push((w.freq >= 5925 ? "6 GHz" : (w.freq >= 4900 ? "5 GHz" : "2.4 GHz")) + (w.chan ? " ch " + w.chan : ""))
                     if (w.dbm !== null) parts.push(w.dbm + " dBm")
                     if (w.rate > 0) parts.push(Math.round(w.rate) + " Mbit/s")
                     if ((w.dbm !== null && w.dbm <= -76) || (w.dbm === null && q >= 0 && q < 40)) {
@@ -1016,7 +1029,9 @@ PlasmoidItem {
         var dnsFail = false, dnsWarn = ""
         if (N) {
             var servers = []
-            var devs = main ? [main.dev] : []
+            var devs = []
+            if (L && L.egress && L.egress.dev && N.links[L.egress.dev]) devs.push(L.egress.dev)
+            if (main && devs.indexOf(main.dev) === -1) devs.push(main.dev)
             for (var dv in N.links) if (N.links.hasOwnProperty(dv) && devs.indexOf(dv) === -1 && N.links[dv].length) devs.push(dv)
             for (var di = 0; di < devs.length; ++di) {
                 var list = N.links[devs[di]] || []
@@ -1049,12 +1064,22 @@ PlasmoidItem {
         }
 
         var s5 = step("web", "Websites")
+        var v6Delay = 0
         if (W) {
             if (webOk) {
                 s5.status = W.total > 3 ? "warn" : "ok"
                 s5.value = root.fmtMs(W.total * 1000)
                 s5.detail = "HTTPS · DNS " + Math.round(W.dns * 1000) + " · connect " + Math.round(Math.max(0, W.connect - W.dns) * 1000)
                     + " · TLS " + Math.round(Math.max(0, W.tls - W.connect) * 1000) + " · reply " + Math.round(Math.max(0, W.ttfb - W.tls) * 1000) + " ms"
+                // Connected over IPv4, but much later than an IPv4-only request: IPv6 was tried first and failed
+                if (W.v4 && W.v4.code >= 200 && W.v4.code < 400 && W.ip && W.ip.indexOf(":") === -1) {
+                    var extra = (W.connect - W.dns) - (W.v4.connect - W.v4.dns)
+                    if (extra >= 0.15) {
+                        v6Delay = Math.round(extra * 1000)
+                        s5.status = "warn"
+                        s5.detail += " · failed IPv6 attempts +" + v6Delay + " ms"
+                    }
+                }
             } else {
                 s5.status = "fail"
                 s5.value = portal ? "Sign-in" : "Failed"
@@ -1098,7 +1123,10 @@ PlasmoidItem {
         var v6Broken = false, v6Leak = false
         if (V6) {
             var v6Works = !!((V6.ping && V6.ping.recv > 0) || V6.pub)
+            var v6Global = V6.addrs.filter(function(a) { return /^[23]/.test(a) })
             if (!V6.addrs.length) { t6.status = "info"; t6.value = "Not provided"; t6.detail = "No IPv6 address from the network" }
+            else if (vpnFull && V6.egress && isVpn(V6.egress) && !v6Works) { t6.status = "info"; t6.value = "Blocked by VPN"; t6.detail = "The VPN stops IPv6 so it cannot leak around the tunnel" }
+            else if (!v6Global.length && !v6Works) { t6.status = "info"; t6.value = "Not provided"; t6.detail = "Only a local address (" + V6.addrs[0].replace(/\/\d+$/, "") + ")" }
             else if (!V6.routes) { t6.status = "info"; t6.value = "No route"; t6.detail = V6.addrs[0] }
             else if (v6Works && vpnFull && V6.egress && !isVpn(V6.egress)) {
                 // IPv4 goes through the VPN, IPv6 around it: sites see the real address
@@ -1119,7 +1147,7 @@ PlasmoidItem {
                 // The tunnel that carries the internet traffic first
                 var main0 = vpns[0]
                 for (var vv = 0; vv < vpns.length; ++vv) if (L.egress && vpns[vv].dev === L.egress.dev) main0 = vpns[vv]
-                tv.value = root.diagVpnName(main0, L.nmNames) + (vpns.length > 1 ? " +" + (vpns.length - 1) : "")
+                tv.value = root.diagVpnName(main0, L.nmNames, L.apps) + (vpns.length > 1 ? " +" + (vpns.length - 1) : "")
                 tv.detail = vpnFull ? "Internet traffic goes through the VPN" : "Internet traffic goes around the VPN"
             }
         }
@@ -1177,6 +1205,9 @@ PlasmoidItem {
             verdict = {status: "warn", title: "DNS gives fake answers", hint: "Your DNS server answers for names that do not exist. Consider DNS 1.1.1.1."}
         } else if (dnsWarn === "slow") {
             verdict = {status: "warn", title: "Slow DNS", hint: "An uncached lookup takes " + s3.value + ": websites open slowly. Try DNS 1.1.1.1."}
+        } else if (v6Delay > 0) {
+            verdict = {status: "warn", title: "IPv6 slows down new connections", hint: "Every new connection first tries IPv6, which does not work here: +" + v6Delay + " ms. "
+                + (vpnFull ? "The VPN blocks IPv6: turn on its IPv6 support or turn IPv6 off while it is connected." : "Fix IPv6 on the router or turn it off in the network settings.")}
         } else if (s5.status === "warn") {
             verdict = {status: "warn", title: "Websites respond slowly", hint: "A small HTTPS request took " + s5.value + "."}
         } else if (v6Leak) {
@@ -1765,7 +1796,8 @@ PlasmoidItem {
             var lines = String(data.stdout || "").split("\n")
             for (var i = 0; i < lines.length; ++i) {
                 var m = lines[i].trim().match(/^(\d+\.\d+\.\d+\.\d+)\s+(\S+)$/)
-                if (m) names[m[1]] = m[2]
+                // systemd-resolved answers "_gateway" for the router: a placeholder, not its name
+                if (m && m[2].charAt(0) !== "_") names[m[1]] = m[2]
             }
             root.scanNames = names
         }
@@ -2050,6 +2082,8 @@ font.pixelSize:13 }
                             color: root.errorText !== "" ? root.themeNegative : root.themeSecondary
                             font.pixelSize: 10
                         }
+                        // Takes the free height of a stretched widget, the rows above stay together
+                        Item { Layout.fillHeight: true }
                     }
 
                     ColumnLayout {
@@ -2284,7 +2318,7 @@ font.pixelSize:13 }
                             spacing: 5
                             Image { source: Qt.resolvedUrl("../images/github.svg"); sourceSize.width: 18; sourceSize.height: 18; Layout.preferredWidth: 18; Layout.preferredHeight: 18 }
                             Text { text: "GitHub"; color: root.themeLink; font.pixelSize: 13; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: Qt.openUrlExternally("https://github.com/f1devbin") } }
-                            Text { text: "· v6.1.41"; color: root.themeSecondary; font.pixelSize: 10 }
+                            Text { text: "· v6.1.42"; color: root.themeSecondary; font.pixelSize: 10 }
                             Item { Layout.fillWidth: true }
                         }
                     }
@@ -2402,9 +2436,8 @@ font.pixelSize:13 }
     Rectangle {
         id: featurePanel
         visible: false
-        anchors.centerIn: parent
-        width: Math.min(parent.width - 24, 470)
-        height: Math.min(parent.height - 24, 560)
+        anchors.fill: parent
+        anchors.margins: 12
         radius: 14
         z: 100
         color: root.alpha(root.themeBackground, 1)
@@ -2991,7 +3024,8 @@ font.pixelSize:13 }
                         readonly property bool transfer: root.speedPhase === "download" || root.speedPhase === "upload"
                         readonly property color accent: root.speedPhase === "upload" ? "#ff4040" : (root.speedPhase === "ping" ? "#35d07f" : "#69a9ff")
                         readonly property real radius: Math.max(40, Math.min((width - 24) / 2, (height - 14) / 1.72))
-                        readonly property real centerY: radius + 9
+                        // Centred in a tall panel instead of leaving all the free space under the tiles
+                        readonly property real centerY: Math.max(0, (height - radius * 1.72 - 14) / 2) + radius + 9
                         property real shown: transfer ? root.speedLiveMbps : (root.speedPhase === "done" ? Math.max(0, root.speedDownMbps) : 0)
                         property real spin: 0
                         Behavior on shown { NumberAnimation { duration: 450; easing.type: Easing.OutCubic } }

@@ -1,12 +1,21 @@
 # My IP & Geo
 
-Version 6.1.41
+Version 6.1.42
 
 Compact KDE Plasma 6 widget for public IP/geolocation, local network information and network tools.
 
 ## Requirements
 - KDE Plasma 6 (tested on Kubuntu 26.04). Nothing to install and no root rights: the widget uses `curl`, `ip`, `ping`, `ss` and standard shell tools, all present on Kubuntu by default.
 - Used when present, never required: `iw` or NetworkManager (Wi-Fi details), `resolvectl` (DNS servers), `notify-send` (notifications, D-Bus is used otherwise), KDE System Monitor's `ksgrd_network_helper` (per-application traffic).
+
+## v6.1.42
+- A stretched widget uses its space: the Tools panel fills the whole widget (it was limited to 470×560 and the main view showed around it), the Public IP rows stay together at the top instead of spreading over the height, and the speed gauge is centred in a tall panel.
+- VPN name: a plain tunnel is named after the VPN application that runs (RiseupVPN, CalyxVPN, Mullvad, NordVPN, ExpressVPN, Windscribe, Proton VPN, Amnezia VPN, OpenConnect …), for example "RiseupVPN · tun0".
+- Websites: the same request also runs over IPv4 only. When the normal request connects much later, the time lost on failed IPv6 attempts is shown ("failed IPv6 attempts +200 ms") with a hint what to do.
+- IPv6: only a global address counts as IPv6 from the network; a local-only (ULA) address is "Not provided" instead of a warning.
+- DNS: the servers of the interface that carries the traffic (for example the VPN's own DNS) are listed first.
+- Wi-Fi: the signal percentage is the one NetworkManager shows in the system tray; the live dBm value and the channel are shown next to it.
+- Scanner and route: systemd-resolved's placeholder name `_gateway` is no longer shown as the router's name.
 
 ## v6.1.41
 - VPN detection fixed for OpenVPN on current kernels: with data channel offload (the kernel `ovpn` driver) the interface is still called `tun0` but is not a tun device, so v6.1.40 showed "VPN Off" while RiseupVPN was connected. Any tunnel without a link layer is recognised now, and the interface that carries the internet traffic always counts. The VPN tile names the VPN (NetworkManager connection name, OpenVPN, WireGuard, Cloudflare WARP, Tailscale …). PPPoE as the only connection is not taken for a VPN. The header shield uses the same check.
