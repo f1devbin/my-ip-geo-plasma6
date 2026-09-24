@@ -1,12 +1,16 @@
 # My IP & Geo
 
-Version 6.1.44
+Version 6.1.45
 
 Compact KDE Plasma 6 widget for public IP/geolocation, local network information and network tools.
 
 ## Requirements
 - KDE Plasma 6 (tested on Kubuntu 26.04). Nothing to install and no root rights: the widget uses `curl`, `ip`, `ping`, `ss` and standard shell tools, all present on Kubuntu by default.
 - Used when present, never required: `iw` or NetworkManager (Wi-Fi details), `resolvectl` (DNS servers), `notify-send` (notifications, D-Bus is used otherwise), KDE System Monitor's `ksgrd_network_helper` (per-application traffic).
+
+## v6.1.45
+- Port scanner in the Network Scanner. Click a device in the scan results to open it, then scan its open TCP ports: "Common" (about 55 well-known service ports, a couple of seconds), "1–1024" (all well-known ports) or a custom range (e.g. 8000-9000, capped at 2048 ports). Open ports are shown as chips with the service name (22 ssh, 443 https, 8080 http-alt …), with a "N open · M checked" summary.
+- No root, nmap, netcat or extra packages: it is a plain unprivileged TCP connect through bash's built-in /dev/tcp, run in parallel with a short per-port timeout. It only checks whether a port accepts a connection and sends no data. The host is validated as a bare IP address. Script: `contents/code/portscan.sh`.
 
 ## v6.1.44
 - Local IPs redesigned for readability. Each address is on its own line instead of a single comma-separated line that wrapped (an interface with several networks — e.g. 10.0.8.15/21 plus three 192.168.x.15/24 — was one long block). The redundant duplicate prefix is gone: an address now reads "10.0.8.15/21" with the subnet mask "255.255.248.0" to the right, not "10.0.8.15 /21 · 255.255.248.0 (/21)".
@@ -153,7 +157,7 @@ Compact KDE Plasma 6 widget for public IP/geolocation, local network information
 - Tools continues to use the stable in-widget panel mechanism.
 
 ## Tools
-- Scanner
+- Scanner (device discovery + per-device TCP port scan)
 - Diagnostics
 - Speed
 - Network Apps

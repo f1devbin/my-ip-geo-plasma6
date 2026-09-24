@@ -56,6 +56,10 @@ PlasmoidItem {
     property var scanHosts: []
     property var scanNames: ({})
     property string scanRunCidr: ""
+    property var scanExpanded: ({})              // Scanner: host rows opened for a port scan (ip -> true)
+    property var portScans: ({})                 // ip -> {mode, range, state, scanned, ports:[{port,service}], error}
+    property string portScanIp: ""               // host being scanned right now (one at a time)
+    property int portScanSeq: 0
     property string systemUptime: "—"
 
     property color themeBackgroundRaw: Kirigami.Theme.backgroundColor
@@ -487,6 +491,68 @@ PlasmoidItem {
         scanLoading = true
         scanRunCidr = cidr
         scanApi.connectSource("sh " + codePath("netscan.sh") + " scan " + cidr)
+    }
+
+    // ----- Scanner: per-host TCP port check (portscan.sh) -----
+    function portEntry(ip) {
+        var e = root.portScans[ip]
+        return e ? e : {mode: "common", range: "1-1024", state: "idle", scanned: 0, ports: [], error: ""}
+    }
+    function setPortScan(ip, patch) {
+        var e = root.portEntry(ip)
+        var merged = {mode: e.mode, range: e.range, state: e.state, scanned: e.scanned, ports: e.ports, error: e.error}
+        for (var k in patch) if (patch.hasOwnProperty(k)) merged[k] = patch[k]
+        var next = {}
+        for (var i in root.portScans) if (root.portScans.hasOwnProperty(i)) next[i] = root.portScans[i]
+        next[ip] = merged
+        root.portScans = next
+    }
+    function togglePortExpand(ip) {
+        var next = {}
+        for (var k in root.scanExpanded) if (root.scanExpanded.hasOwnProperty(k)) next[k] = root.scanExpanded[k]
+        if (next[ip]) delete next[ip]; else next[ip] = true
+        root.scanExpanded = next
+    }
+    function setPortMode(ip, mode) { root.setPortScan(ip, {mode: mode}) }
+    function setPortRange(ip, range) { root.setPortScan(ip, {range: range}) }
+
+    // "1-1024" clamped to 1..65535, low value first; "" when it is not a valid range
+    function sanitizeRange(str) {
+        var m = String(str || "").match(/^\s*(\d{1,5})\s*-\s*(\d{1,5})\s*$/)
+        if (!m) return ""
+        var a = Math.min(65535, Math.max(1, +m[1])), b = Math.min(65535, Math.max(1, +m[2]))
+        if (a > b) { var t = a; a = b; b = t }
+        return a + "-" + b
+    }
+    // The spec string passed to portscan.sh
+    function portSpec(ip) {
+        var e = root.portEntry(ip)
+        if (e.mode === "common") return "common"
+        if (e.mode === "wellknown") return "1-1024"
+        return root.sanitizeRange(e.range)
+    }
+    function runPortScan(ip) {
+        if (root.portScanIp !== "") return
+        var spec = root.portSpec(ip)
+        if (spec === "") { root.setPortScan(ip, {state: "error", error: "Enter a range like 1-1024"}); return }
+        var safeIp = String(ip).replace(/[^0-9a-fA-F:.]/g, "")
+        if (!safeIp) return
+        root.portScanIp = ip
+        root.portScanSeq += 1
+        root.setPortScan(ip, {state: "running", ports: [], scanned: 0, error: ""})
+        portScanApi.connectSource("bash " + root.codePath("portscan.sh") + " " + safeIp + " " + spec + " " + root.portScanSeq)
+    }
+    function parsePortScan(text) {
+        var out = {scanned: 0, ports: [], done: false, error: ""}
+        var lines = String(text || "").split("\n")
+        for (var i = 0; i < lines.length; ++i) {
+            var f = lines[i].split(/\s+/)
+            if (f[0] === "SCAN") out.scanned = +f[2] || 0
+            else if (f[0] === "OPEN" && f[1]) out.ports.push({port: +f[1], service: f[2] || ""})
+            else if (f[0] === "DONE") out.done = true
+            else if (f[0] === "ERROR") out.error = lines[i].substring(6).trim() || "scan failed"
+        }
+        return out
     }
 
     function saveWatchedDevices() {
@@ -2043,6 +2109,18 @@ PlasmoidItem {
             root.scanNames = names
         }
     }
+    Plasma5Support.DataSource {
+        id: portScanApi; engine: "executable"
+        onNewData: function(source, data) {
+            portScanApi.disconnectSource(source)
+            var ip = root.portScanIp
+            root.portScanIp = ""
+            if (!ip) return
+            var r = root.parsePortScan(data.stdout)
+            if (r.error) { root.setPortScan(ip, {state: "error", error: r.error}); return }
+            root.setPortScan(ip, {state: "done", scanned: r.scanned, ports: r.ports, error: ""})
+        }
+    }
     Plasma5Support.DataSource { id: monitorApi; engine:"executable"; onNewData:function(source,data){
         monitorApi.disconnectSource(source)
         var lines=String(data.stdout||"").split("\n")
@@ -2596,7 +2674,7 @@ font.pixelSize:13 }
                             spacing: 5
                             Image { source: Qt.resolvedUrl("../images/github.svg"); sourceSize.width: 18; sourceSize.height: 18; Layout.preferredWidth: 18; Layout.preferredHeight: 18 }
                             Text { text: "GitHub"; color: root.themeLink; font.pixelSize: 13; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: Qt.openUrlExternally("https://github.com/f1devbin") } }
-                            Text { text: "· v6.1.44"; color: root.themeSecondary; font.pixelSize: 10 }
+                            Text { text: "· v6.1.45"; color: root.themeSecondary; font.pixelSize: 10 }
                             Item { Layout.fillWidth: true }
                         }
                     }
@@ -2827,7 +2905,7 @@ font.pixelSize:13 }
                         Text { text: root.scanLoading ? "Scanning…" : root.scanStatus; color: root.scanLoading ? root.themeHighlight : root.themeSecondary; font.pixelSize: 9 }
                     }
                     Text {
-                        text: "Finds every device on the network, including ones that ignore ping (they still answer ARP). A scan takes about 10 seconds."
+                        text: "Finds every device on the network, including ones that ignore ping (they still answer ARP). A scan takes about 10 seconds. Click a device to scan its open ports."
                         color: root.themeSecondary
                         font.pixelSize: 10
                         Layout.fillWidth: true
@@ -2949,6 +3027,13 @@ font.pixelSize:13 }
                                 model: root.scanHosts
                                 delegate: Rectangle {
                                     id: hostRow
+                                    readonly property string ipKey: modelData.ip
+                                    readonly property string macAddr: modelData.mac
+                                    readonly property bool expanded: root.scanExpanded[ipKey] === true
+                                    readonly property var scan: root.portScans[ipKey] || null
+                                    readonly property string pmode: scan ? scan.mode : "common"
+                                    readonly property string prange: scan ? scan.range : "1-1024"
+                                    readonly property string pstate: scan ? scan.state : "idle"
                                     // "Router" / "This device" and the reverse DNS name, when known
                                     readonly property string note: {
                                         var parts = []
@@ -2959,71 +3044,209 @@ font.pixelSize:13 }
                                         return parts.join(" · ")
                                     }
                                     width: scanHostColumn.width
-                                    height: 38
+                                    height: hostBody.implicitHeight
                                     radius: 6
-                                    color: root.alpha(root.themeText, .045)
+                                    color: root.alpha(root.themeText, hostRow.expanded ? .07 : .045)
                                     border.width: 1
-                                    border.color: root.alpha(root.themeText, .08)
+                                    border.color: root.alpha(root.themeText, hostRow.expanded ? .16 : .08)
+                                    clip: true
 
-                                    RowLayout {
-                                        anchors.fill: parent
-                                        anchors.leftMargin: 8
-                                        anchors.rightMargin: 5
-                                        spacing: 6
+                                    Column {
+                                        id: hostBody
+                                        width: parent.width
 
-                                        Rectangle {
-                                            Layout.preferredWidth: 8
-                                            Layout.preferredHeight: 8
-                                            radius: 4
-                                            color: modelData.via === "ping" ? root.themePositive : "#e0a030"
-                                        }
-                                        ColumnLayout {
-                                            Layout.fillWidth: true
-                                            spacing: 0
-                                            TextEdit {
-                                                Layout.fillWidth: true
-                                                text: modelData.ip
-                                                color: root.themeText
-                                                font.pixelSize: 10
-                                                readOnly: true
-                                                selectByMouse: true
-                                                selectByKeyboard: true
-                                                cursorVisible: false
-                                            }
-                                            Text {
-                                                visible: hostRow.note !== ""
-                                                Layout.fillWidth: true
-                                                text: hostRow.note
-                                                color: root.themeLink
-                                                font.pixelSize: 10
-                                                elide: Text.ElideRight
-                                            }
-                                        }
-                                        TextEdit {
-                                            Layout.preferredWidth: 112
-                                            text: modelData.mac
-                                            color: root.themeText
-                                            font.pixelSize: 10
-                                            readOnly: true
-                                            selectByMouse: true
-                                            selectByKeyboard: true
-                                            cursorVisible: false
-                                        }
+                                        // Header row: click anywhere (except the buttons) to open the port scan
                                         Item {
-                                            Layout.preferredWidth: 44
-                                            Layout.fillHeight: true
-                                            Controls.Button {
-                                                anchors.centerIn: parent
-                                                width: 30
-                                                height: 26
-                                                text: {
-                                                    var watching = false
-                                                    for (var wi = 0; wi < root.watchedDevices.length; ++wi) {
-                                                        if (root.watchedDevices[wi].ip === modelData.ip) { watching = true; break }
-                                                    }
-                                                    return watching ? "−" : "+"
+                                            width: parent.width
+                                            height: 38
+                                            MouseArea {
+                                                anchors.fill: parent
+                                                cursorShape: Qt.PointingHandCursor
+                                                onClicked: root.togglePortExpand(hostRow.ipKey)
+                                            }
+                                            RowLayout {
+                                                anchors.fill: parent
+                                                anchors.leftMargin: 8
+                                                anchors.rightMargin: 5
+                                                spacing: 6
+                                                Rectangle {
+                                                    Layout.preferredWidth: 8
+                                                    Layout.preferredHeight: 8
+                                                    radius: 4
+                                                    color: modelData.via === "ping" ? root.themePositive : "#e0a030"
                                                 }
-                                                onClicked: root.toggleWatchedDevice(modelData.ip, modelData.mac)
+                                                ColumnLayout {
+                                                    Layout.fillWidth: true
+                                                    spacing: 0
+                                                    TextEdit {
+                                                        Layout.fillWidth: true
+                                                        text: modelData.ip
+                                                        color: root.themeText
+                                                        font.pixelSize: 10
+                                                        readOnly: true
+                                                        selectByMouse: true
+                                                        selectByKeyboard: true
+                                                        cursorVisible: false
+                                                    }
+                                                    Text {
+                                                        visible: hostRow.note !== ""
+                                                        Layout.fillWidth: true
+                                                        text: hostRow.note
+                                                        color: root.themeLink
+                                                        font.pixelSize: 10
+                                                        elide: Text.ElideRight
+                                                    }
+                                                }
+                                                Text {
+                                                    text: hostRow.expanded ? "\u2304" : "\u203a"
+                                                    color: root.themeSecondary
+                                                    font.pixelSize: 14
+                                                    Layout.preferredWidth: 12
+                                                    horizontalAlignment: Text.AlignHCenter
+                                                }
+                                                TextEdit {
+                                                    Layout.preferredWidth: 112
+                                                    text: modelData.mac
+                                                    color: root.themeText
+                                                    font.pixelSize: 10
+                                                    readOnly: true
+                                                    selectByMouse: true
+                                                    selectByKeyboard: true
+                                                    cursorVisible: false
+                                                }
+                                                Item {
+                                                    Layout.preferredWidth: 44
+                                                    Layout.preferredHeight: 38
+                                                    Controls.Button {
+                                                        anchors.centerIn: parent
+                                                        width: 30
+                                                        height: 26
+                                                        text: {
+                                                            var watching = false
+                                                            for (var wi = 0; wi < root.watchedDevices.length; ++wi) {
+                                                                if (root.watchedDevices[wi].ip === modelData.ip) { watching = true; break }
+                                                            }
+                                                            return watching ? "\u2212" : "+"
+                                                        }
+                                                        onClicked: root.toggleWatchedDevice(modelData.ip, modelData.mac)
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        // Port scan panel
+                                        Column {
+                                            visible: hostRow.expanded
+                                            x: 8
+                                            width: parent.width - 16
+                                            spacing: 6
+                                            bottomPadding: 8
+
+                                            Rectangle { width: parent.width; height: 1; color: root.alpha(root.themeText, .08) }
+
+                                            Text { text: "Scan TCP ports on " + hostRow.ipKey; color: root.themeText; font.pixelSize: 10; font.bold: true }
+
+                                            // Which ports to check
+                                            Row {
+                                                width: parent.width
+                                                spacing: 5
+                                                Repeater {
+                                                    model: [{k: "common", t: "Common"}, {k: "wellknown", t: "1\u20131024"}, {k: "range", t: "Range"}]
+                                                    delegate: Rectangle {
+                                                        readonly property bool sel: hostRow.pmode === modelData.k
+                                                        width: (parent.width - 10) / 3
+                                                        height: 26
+                                                        radius: 5
+                                                        color: sel ? root.alpha(root.themeHighlight, .18) : root.alpha(root.themeBackground, .80)
+                                                        border.width: 1
+                                                        border.color: sel ? root.themeHighlight : root.alpha(root.themeText, .12)
+                                                        Text {
+                                                            anchors.centerIn: parent
+                                                            text: modelData.t
+                                                            color: root.themeText
+                                                            font.pixelSize: 10
+                                                            font.bold: parent.sel
+                                                        }
+                                                        MouseArea {
+                                                            anchors.fill: parent
+                                                            cursorShape: Qt.PointingHandCursor
+                                                            onClicked: root.setPortMode(hostRow.ipKey, modelData.k)
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            // Custom range input
+                                            Row {
+                                                width: parent.width
+                                                spacing: 5
+                                                visible: hostRow.pmode === "range"
+                                                Controls.TextField {
+                                                    id: rangeField
+                                                    width: parent.width - 66
+                                                    text: hostRow.prange
+                                                    placeholderText: "from-to, e.g. 8000-9000"
+                                                    font.pixelSize: 10
+                                                    selectByMouse: true
+                                                    onEditingFinished: root.setPortRange(hostRow.ipKey, text.trim())
+                                                    onAccepted: { root.setPortRange(hostRow.ipKey, text.trim()); root.runPortScan(hostRow.ipKey) }
+                                                }
+                                                Text {
+                                                    anchors.verticalCenter: parent.verticalCenter
+                                                    text: "max 2048"
+                                                    color: root.themeSecondary
+                                                    font.pixelSize: 9
+                                                }
+                                            }
+                                            // Run + live state
+                                            Row {
+                                                width: parent.width
+                                                spacing: 8
+                                                Controls.Button {
+                                                    width: 108
+                                                    height: 28
+                                                    text: hostRow.pstate === "running" ? "Scanning\u2026" : "Scan ports"
+                                                    enabled: root.portScanIp === ""
+                                                    onClicked: root.runPortScan(hostRow.ipKey)
+                                                }
+                                                Text {
+                                                    anchors.verticalCenter: parent.verticalCenter
+                                                    width: parent.width - 116
+                                                    elide: Text.ElideRight
+                                                    text: hostRow.pstate === "error" ? hostRow.scan.error
+                                                        : hostRow.pstate === "running" ? "Checking ports\u2026"
+                                                        : hostRow.pstate === "done" ? (hostRow.scan.ports.length > 0
+                                                            ? hostRow.scan.ports.length + " open \u00b7 " + hostRow.scan.scanned + " checked"
+                                                            : "No open ports \u00b7 " + hostRow.scan.scanned + " checked")
+                                                        : "Plain TCP connect, no root needed"
+                                                    color: hostRow.pstate === "error" ? root.themeNegative
+                                                        : hostRow.pstate === "running" ? root.themeHighlight
+                                                        : (hostRow.pstate === "done" && hostRow.scan.ports.length > 0) ? root.themePositive
+                                                        : root.themeSecondary
+                                                    font.pixelSize: 10
+                                                }
+                                            }
+                                            // Open ports
+                                            Flow {
+                                                width: parent.width
+                                                spacing: 5
+                                                Repeater {
+                                                    model: (hostRow.scan && hostRow.pstate === "done") ? hostRow.scan.ports : []
+                                                    delegate: Rectangle {
+                                                        radius: 4
+                                                        height: 20
+                                                        width: portChip.width + 12
+                                                        color: root.alpha(root.themePositive, .16)
+                                                        border.width: 1
+                                                        border.color: root.alpha(root.themePositive, .35)
+                                                        Row {
+                                                            id: portChip
+                                                            anchors.centerIn: parent
+                                                            spacing: 4
+                                                            Text { text: modelData.port; color: root.themeText; font.pixelSize: 10; font.bold: true }
+                                                            Text { visible: modelData.service !== ""; text: modelData.service; color: root.themeSecondary; font.pixelSize: 10 }
+                                                        }
+                                                    }
+                                                }
                                             }
                                         }
                                     }
