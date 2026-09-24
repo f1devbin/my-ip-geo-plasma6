@@ -1,12 +1,16 @@
 # My IP & Geo
 
-Version 6.1.43
+Version 6.1.44
 
 Compact KDE Plasma 6 widget for public IP/geolocation, local network information and network tools.
 
 ## Requirements
 - KDE Plasma 6 (tested on Kubuntu 26.04). Nothing to install and no root rights: the widget uses `curl`, `ip`, `ping`, `ss` and standard shell tools, all present on Kubuntu by default.
 - Used when present, never required: `iw` or NetworkManager (Wi-Fi details), `resolvectl` (DNS servers), `notify-send` (notifications, D-Bus is used otherwise), KDE System Monitor's `ksgrd_network_helper` (per-application traffic).
+
+## v6.1.44
+- Local IPs redesigned for readability. Each address is on its own line instead of a single comma-separated line that wrapped (an interface with several networks — e.g. 10.0.8.15/21 plus three 192.168.x.15/24 — was one long block). The redundant duplicate prefix is gone: an address now reads "10.0.8.15/21" with the subnet mask "255.255.248.0" to the right, not "10.0.8.15 /21 · 255.255.248.0 (/21)".
+- Each interface card has a header with the name and an "IPv4 / IPv6 / IPv4 + IPv6" badge, then the addresses grouped under an "IPv4" / "IPv6" label (with the count when there is more than one), then Gateway and DNS on their own labelled lines. Every value stays selectable for copying.
 
 ## v6.1.43
 - Network Apps opens with the traffic leaders. One row per application: processes with the same name (three `curl`, Firefox's content processes, `warp-svc` + `warp-taskbar`) are one row with their speeds and connections added up; the expanded row lists the PIDs.

@@ -338,6 +338,32 @@ PlasmoidItem {
         return ((mask >>> 24) & 255) + "." + ((mask >>> 16) & 255) + "." + ((mask >>> 8) & 255) + "." + (mask & 255) + " (/" + p + ")"
     }
 
+    // Dotted subnet mask without the "(/p)" suffix, e.g. 21 -> "255.255.248.0"
+    function plainMask(prefix) {
+        var p = parseInt(prefix)
+        if (isNaN(p) || p < 0 || p > 32) return ""
+        if (p === 0) return "0.0.0.0"
+        var mask = (0xffffffff << (32 - p)) >>> 0
+        return ((mask >>> 24) & 255) + "." + ((mask >>> 16) & 255) + "." + ((mask >>> 8) & 255) + "." + (mask & 255)
+    }
+
+    // One flat list of address rows for an interface: an "IPv4"/"IPv6" header, then one entry per address
+    function ifaceAddrRows(item) {
+        if (!item) return []
+        var rows = []
+        if (item.ipv4 && item.ipv4.length) {
+            rows.push({header: item.ipv4.length > 1 ? "IPv4  \u00b7  " + item.ipv4.length + " addresses" : "IPv4"})
+            for (var i = 0; i < item.ipv4.length; ++i)
+                rows.push({addr: item.ipv4[i] + "/" + item.ipv4Prefix[i], mask: root.plainMask(item.ipv4Prefix[i]), fam: 4})
+        }
+        if (item.ipv6 && item.ipv6.length) {
+            rows.push({header: item.ipv6.length > 1 ? "IPv6  \u00b7  " + item.ipv6.length + " addresses" : "IPv6"})
+            for (var j = 0; j < item.ipv6.length; ++j)
+                rows.push({addr: item.ipv6[j] + "/" + item.ipv6Prefix[j], mask: "", fam: 6})
+        }
+        return rows
+    }
+
     function activeInterface() {
         return root.localItems.length > 0 ? root.localItems[0] : null
     }
@@ -2324,104 +2350,141 @@ font.pixelSize:13 }
                                 Repeater {
                                     model: root.localItems
                                     delegate: Rectangle {
+                                        id: localRow
+                                        readonly property var netItem: modelData
+                                        readonly property var addrRows: root.ifaceAddrRows(netItem)
                                         width: localTable.width
-                                        height: Math.max(72, Math.max(localLeftColumn.implicitHeight, localRightColumn.implicitHeight) + 20)
+                                        height: localCard.implicitHeight + 20
                                         radius: 9
                                         color: root.alpha(root.themeText, 0.045)
                                         border.width: 1
                                         border.color: root.alpha(root.themeText, 0.16)
                                         clip: true
 
-                                        Row {
-                                            anchors.fill: parent
+                                        Column {
+                                            id: localCard
+                                            anchors.left: parent.left
+                                            anchors.right: parent.right
+                                            anchors.top: parent.top
                                             anchors.leftMargin: 12
                                             anchors.rightMargin: 12
                                             anchors.topMargin: 10
-                                            anchors.bottomMargin: 10
-                                            spacing: 12
+                                            spacing: 6
 
-                                            Column {
-                                                id: localLeftColumn
-                                                width: parent.width * 0.38
-                                                spacing: 3
-
+                                            // Interface name and connection type
+                                            Item {
+                                                width: parent.width
+                                                implicitHeight: Math.max(ifaceName.implicitHeight, typeBadge.height)
                                                 TextEdit {
-                                                    width: parent.width
-                                                    text: modelData.iface
+                                                    id: ifaceName
+                                                    anchors.left: parent.left
+                                                    anchors.right: typeBadge.left
+                                                    anchors.rightMargin: 8
+                                                    anchors.verticalCenter: parent.verticalCenter
+                                                    text: localRow.netItem.iface
                                                     color: root.themeText
                                                     font.bold: true
-                                                    font.pixelSize: 12
-                                                    readOnly: true
-                                                    selectByMouse: true
-                                                    selectByKeyboard: true
-                                                    cursorVisible: false
-                                                    wrapMode: TextEdit.Wrap
+                                                    font.pixelSize: 13
+                                                    readOnly: true; selectByMouse: true; selectByKeyboard: true; cursorVisible: false
+                                                    wrapMode: TextEdit.NoWrap
                                                 }
-                                                Text {
-                                                    text: (modelData.ipv4.length && modelData.ipv6.length) ? "IPv4 + IPv6" : (modelData.ipv4.length ? "IPv4" : "IPv6")
-                                                    color: root.themeSecondary
-                                                    font.pixelSize: 10
+                                                Rectangle {
+                                                    id: typeBadge
+                                                    anchors.right: parent.right
+                                                    anchors.verticalCenter: parent.verticalCenter
+                                                    radius: 4
+                                                    color: root.alpha(root.themeLink, 0.14)
+                                                    width: typeLabel.implicitWidth + 12
+                                                    height: typeLabel.implicitHeight + 6
+                                                    Text {
+                                                        id: typeLabel
+                                                        anchors.centerIn: parent
+                                                        text: (localRow.netItem.ipv4.length && localRow.netItem.ipv6.length) ? "IPv4 + IPv6" : (localRow.netItem.ipv4.length ? "IPv4" : "IPv6")
+                                                        color: root.themeLink
+                                                        font.pixelSize: 9
+                                                        font.bold: true
+                                                    }
                                                 }
-                                                TextEdit {
-                                                    width: parent.width
-                                                    text: "MAC: " + (modelData.mac || "—")
-                                                    color: root.themeSecondary
-                                                    font.pixelSize: 10
-                                                    readOnly: true
-                                                    selectByMouse: true
-                                                    selectByKeyboard: true
-                                                    cursorVisible: false
-                                                    wrapMode: TextEdit.Wrap
+                                            }
+                                            TextEdit {
+                                                width: parent.width
+                                                visible: localRow.netItem.mac && localRow.netItem.mac !== "\u2014"
+                                                text: "MAC  " + localRow.netItem.mac
+                                                color: root.themeSecondary
+                                                font.pixelSize: 10
+                                                readOnly: true; selectByMouse: true; selectByKeyboard: true; cursorVisible: false
+                                                wrapMode: TextEdit.NoWrap
+                                            }
+
+                                            Rectangle { width: parent.width; height: 1; color: root.alpha(root.themeText, 0.10) }
+
+                                            // Every address on its own line: an "IPv4"/"IPv6" header then one row per address
+                                            Repeater {
+                                                model: localRow.addrRows
+                                                delegate: Item {
+                                                    width: localCard.width
+                                                    implicitHeight: modelData.header !== undefined ? addrHeader.implicitHeight + 2 : Math.max(addrValue.implicitHeight, maskText.implicitHeight)
+                                                    Text {
+                                                        id: addrHeader
+                                                        visible: modelData.header !== undefined
+                                                        anchors.left: parent.left
+                                                        anchors.bottom: parent.bottom
+                                                        text: modelData.header || ""
+                                                        color: root.themeSecondary
+                                                        font.pixelSize: 9
+                                                        font.bold: true
+                                                    }
+                                                    TextEdit {
+                                                        id: addrValue
+                                                        visible: modelData.header === undefined
+                                                        anchors.left: parent.left
+                                                        anchors.right: maskText.left
+                                                        anchors.rightMargin: 8
+                                                        anchors.verticalCenter: parent.verticalCenter
+                                                        text: modelData.addr || ""
+                                                        color: root.themeText
+                                                        font.pixelSize: modelData.fam === 6 ? 11 : 12
+                                                        readOnly: true; selectByMouse: true; selectByKeyboard: true; cursorVisible: false
+                                                        wrapMode: TextEdit.NoWrap
+                                                    }
+                                                    Text {
+                                                        id: maskText
+                                                        visible: modelData.header === undefined && !!modelData.mask
+                                                        anchors.right: parent.right
+                                                        anchors.verticalCenter: parent.verticalCenter
+                                                        text: modelData.mask ? "mask " + modelData.mask : ""
+                                                        color: root.themeSecondary
+                                                        font.pixelSize: 10
+                                                    }
                                                 }
                                             }
 
-                                            Column {
-                                                id: localRightColumn
-                                                width: parent.width * 0.62 - 12
-                                                spacing: 2
+                                            Rectangle { width: parent.width; height: 1; color: root.alpha(root.themeText, 0.10) }
 
+                                            // Gateway and DNS for this interface
+                                            Row {
+                                                width: parent.width
+                                                spacing: 8
+                                                Text { text: "Gateway"; color: root.themeSecondary; font.pixelSize: 10; width: 62; anchors.verticalCenter: parent.verticalCenter }
                                                 TextEdit {
-                                                    width: parent.width
-                                                    text: "IPv4: " + (modelData.ipv4.length ? modelData.ipv4.map(function(v,k) { return v + " /" + modelData.ipv4Prefix[k] + " · " + root.maskFor(modelData.ipv4Prefix[k], "IPv4") }).join(", ") : "—")
+                                                    width: parent.width - 70
+                                                    text: root.gatewayFor(localRow.netItem.iface)
                                                     color: root.themeText
-                                                    font.pixelSize: 10
-                                                    readOnly: true
-                                                    selectByMouse: true
-                                                    selectByKeyboard: true
-                                                    cursorVisible: false
-                                                    wrapMode: TextEdit.Wrap
+                                                    font.pixelSize: 11
+                                                    readOnly: true; selectByMouse: true; selectByKeyboard: true; cursorVisible: false
+                                                    wrapMode: TextEdit.NoWrap
                                                 }
+                                            }
+                                            Row {
+                                                width: parent.width
+                                                spacing: 8
+                                                Text { text: "DNS"; color: root.themeSecondary; font.pixelSize: 10; width: 62; anchors.verticalCenter: parent.verticalCenter }
                                                 TextEdit {
-                                                    width: parent.width
-                                                    text: "IPv6: " + (modelData.ipv6.length ? modelData.ipv6.map(function(v,k) { return v + " /" + modelData.ipv6Prefix[k] }).join(", ") : "—")
+                                                    width: parent.width - 70
+                                                    text: root.dnsFor(localRow.netItem.iface)
                                                     color: root.themeText
-                                                    font.pixelSize: 10
-                                                    readOnly: true
-                                                    selectByMouse: true
-                                                    selectByKeyboard: true
-                                                    cursorVisible: false
-                                                    wrapMode: TextEdit.Wrap
-                                                }
-                                                TextEdit {
-                                                    width: parent.width
-                                                    text: "Gateway: " + root.gatewayFor(modelData.iface)
-                                                    color: root.themeText
-                                                    font.pixelSize: 10
-                                                    readOnly: true
-                                                    selectByMouse: true
-                                                    selectByKeyboard: true
-                                                    cursorVisible: false
-                                                    wrapMode: TextEdit.Wrap
-                                                }
-                                                TextEdit {
-                                                    width: parent.width
-                                                    text: "DNS: " + root.dnsFor(modelData.iface)
-                                                    color: root.themeText
-                                                    font.pixelSize: 10
-                                                    readOnly: true
-                                                    selectByMouse: true
-                                                    selectByKeyboard: true
-                                                    cursorVisible: false
+                                                    font.pixelSize: 11
+                                                    readOnly: true; selectByMouse: true; selectByKeyboard: true; cursorVisible: false
                                                     wrapMode: TextEdit.Wrap
                                                 }
                                             }
@@ -2533,7 +2596,7 @@ font.pixelSize:13 }
                             spacing: 5
                             Image { source: Qt.resolvedUrl("../images/github.svg"); sourceSize.width: 18; sourceSize.height: 18; Layout.preferredWidth: 18; Layout.preferredHeight: 18 }
                             Text { text: "GitHub"; color: root.themeLink; font.pixelSize: 13; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: Qt.openUrlExternally("https://github.com/f1devbin") } }
-                            Text { text: "· v6.1.43"; color: root.themeSecondary; font.pixelSize: 10 }
+                            Text { text: "· v6.1.44"; color: root.themeSecondary; font.pixelSize: 10 }
                             Item { Layout.fillWidth: true }
                         }
                     }
