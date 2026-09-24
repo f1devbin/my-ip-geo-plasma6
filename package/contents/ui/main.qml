@@ -75,7 +75,9 @@ PlasmoidItem {
     property color themeBackground: themeBackgroundRaw
     property color themeText: contrastText(themeBackgroundRaw, themeTextRaw)
     property color themeLink: contrastText(themeBackgroundRaw, themeLinkRaw)
-    property color themeSecondary: contrastText(themeBackgroundRaw, themeSecondaryRaw)
+    // Secondary text is mostly the text colour: the theme's "disabled" grey is hard to read on a dark background
+    function mix(a, b, t) { return Qt.rgba(a.r + (b.r - a.r) * t, a.g + (b.g - a.g) * t, a.b + (b.b - a.b) * t, 1) }
+    property color themeSecondary: contrastText(themeBackgroundRaw, mix(themeTextRaw, themeSecondaryRaw, 0.25))
     property color themePositive: contrastText(themeBackgroundRaw, themePositiveRaw)
     property color themeNegative: contrastText(themeBackgroundRaw, themeNegativeRaw)
     property color themeSurface: root.themeBackground
@@ -92,6 +94,7 @@ PlasmoidItem {
     property string timezone: "—"
     property string updated: "—"
     property string errorText: ""
+    property string ipSource: ""
     property var localItems: []
     property var gatewayMap: ({})
     property var dnsMap: ({})
@@ -100,6 +103,7 @@ PlasmoidItem {
     property string internetQuality: "unknown"
     property bool vpnActive: false
     property int statusSeq: 0
+    property int monitorSeq: 0
     // Diagnostics: parsed result per check, checks still running, run id and times
     readonly property var diagChecks: ["link", "gateway", "dns", "internet", "web", "ipv6", "mtu", "route"]
     property var diag: ({})
@@ -222,6 +226,53 @@ PlasmoidItem {
         }
         onStatusChanged: { diagIconMark.requestPaint(); diagIconSpinner.requestPaint() }
         onTintChanged: { diagIconMark.requestPaint(); diagIconSpinner.requestPaint() }
+    }
+
+    // publicip.sh output: "__SRC__ <provider>" and the provider's answer -> one set of fields
+    function parsePublicIp(text) {
+        var t = String(text || "")
+        var m = t.match(/^__SRC__ (\S+)/m)
+        var src = m ? m[1] : ""
+        var body = m ? t.substring(m.index + m[0].length) : t
+        var r = {ok: false, src: src, ip: "", country: "", countryCode: "", city: "", region: "", lat: NaN, lon: NaN, isp: "", asn: "", tz: "", error: ""}
+        try {
+            if (src === "ipwho.is") {
+                var d = JSON.parse(body)
+                r.ip = d.ip || ""
+                r.country = d.country || ""
+                r.countryCode = d.country_code || ""
+                r.city = d.city || ""
+                r.region = d.region || ""
+                r.lat = d.latitude !== undefined ? Number(d.latitude) : NaN
+                r.lon = d.longitude !== undefined ? Number(d.longitude) : NaN
+                r.isp = d.connection && d.connection.isp ? d.connection.isp : ""
+                r.asn = d.connection && d.connection.asn ? "AS" + d.connection.asn : ""
+                r.tz = d.timezone && d.timezone.id ? d.timezone.id : ""
+            } else if (src === "ipapi.co") {
+                var a = JSON.parse(body)
+                r.ip = a.ip || ""
+                r.country = a.country_name || ""
+                r.countryCode = a.country_code || ""
+                r.city = a.city || ""
+                r.region = a.region || ""
+                r.lat = a.latitude !== undefined && a.latitude !== null ? Number(a.latitude) : NaN
+                r.lon = a.longitude !== undefined && a.longitude !== null ? Number(a.longitude) : NaN
+                r.isp = a.org || ""
+                r.asn = a.asn || ""
+                r.tz = a.timezone || ""
+            } else if (src === "cloudflare") {
+                var ip = body.match(/^ip=(\S+)/m)
+                var loc = body.match(/^loc=([A-Z]{2})\s*$/m)
+                r.ip = ip ? ip[1] : ""
+                r.countryCode = loc ? loc[1] : ""
+                r.country = r.countryCode
+            }
+        } catch (e) {
+            r.ip = ""
+        }
+        r.ok = r.ip !== ""
+        if (!r.ok) r.error = src === "none" || src === "" ? "No connection to the IP services (ipwho.is, ipapi.co, Cloudflare)" : "Unreadable answer from " + src
+        return r
     }
 
     function formatUptime(seconds) {
@@ -467,8 +518,8 @@ PlasmoidItem {
             if (safeIp) ips.push(safeIp)
         }
         if (!ips.length) { monitorLoading = false; return }
-        var command = "sh -c 'for ip in " + ips.join(" ") + "; do if ping -c 1 -W 1 \"$ip\" >/dev/null 2>&1; then printf \"%s\\tUP\\n\" \"$ip\"; else printf \"%s\\tDOWN\\n\" \"$ip\"; fi; done'"
-        monitorApi.connectSource(command)
+        root.monitorSeq += 1
+        monitorApi.connectSource("MYIPGEO_RUN=" + root.monitorSeq + " sh " + codePath("monitor.sh") + " " + ips.join(" "))
     }
 
     function refreshAll() {
@@ -476,7 +527,7 @@ PlasmoidItem {
         uptimeApi.connectSource("cut -d' ' -f1 /proc/uptime")
         if (!loading) {
             loading = true
-            publicApi.connectSource("curl -4 -fsSL --max-time 12 'https://ipwho.is/?lang=en'")
+            publicApi.connectSource("sh " + codePath("publicip.sh") + " " + Date.now())
         }
         if (!localLoading) {
             localLoading = true
@@ -617,7 +668,7 @@ PlasmoidItem {
     }
 
     function parseDiagLink(text) {
-        var r = {routes4: [], routes6: [], egress: null, ifaces: {}, order: [], vpns: [], nm: ""}
+        var r = {routes4: [], routes6: [], egress: null, ifaces: {}, order: [], vpns: [], nm: "", nmNames: {}}
         function iface(dev) {
             if (!r.ifaces[dev]) {
                 r.ifaces[dev] = {dev: dev, kind: "other", devtype: "", mtu: 0, speed: -1, duplex: "", mac: "", addrs: [], addrs6: [], wifi: null}
@@ -674,8 +725,13 @@ PlasmoidItem {
             } else if ((m = line.match(/^PROCWL (\S+): \S+\s+[\d.]+\s+(-?\d+)/))) {
                 var pw = wifi(m[1])
                 if (pw.dbm === null) pw.dbm = +m[2]
-            } else if ((m = line.match(/^VPN (\S+) (\S+)/))) r.vpns.push({dev: m[1], kind: m[2]})
+            } else if ((m = line.match(/^VPN (\S+) (\S+)(?: (\S+))?/))) r.vpns.push({dev: m[1], kind: m[2], type: m[3] || ""})
             else if ((m = line.match(/^NMCONN (\S+)/))) r.nm = m[1]
+            else if ((m = line.match(/^NMACTIVE (.*)$/))) {
+                // DEVICE:NAME of active NetworkManager connections
+                var nf = root.splitTerse(m[1])
+                if (nf[0] && nf[1]) r.nmNames[nf[0]] = nf[1]
+            }
         }
         return r
     }
@@ -746,11 +802,12 @@ PlasmoidItem {
 
     function parseDiagIpv6(text) {
         var t = String(text || "")
-        var r = {addrs: [], routes: 0, ping: null, pub: ""}
+        var r = {addrs: [], routes: 0, ping: null, pub: "", egress: ""}
         var re = /^ADDR6 (\S+)/gm
         var m
         while ((m = re.exec(t)) !== null) r.addrs.push(m[1])
         r.routes = (t.match(/^ROUTE6 /gm) || []).length
+        if ((m = t.match(/^EGRESS6 .* dev (\S+)/m))) r.egress = m[1]
         var a = t.indexOf("__PING__")
         if (a >= 0) r.ping = root.parsePing(t.substring(a))
         if ((m = t.match(/^PUBLIC6 (\S+)/m))) r.pub = m[1]
@@ -828,13 +885,16 @@ PlasmoidItem {
         return fallback
     }
 
-    function diagVpnName(v) {
+    function diagVpnName(v, nmNames) {
         if (v.dev === "CloudflareWARP") return "Cloudflare WARP"
         if (/^tailscale/.test(v.dev)) return "Tailscale"
         if (v.dev === "nordlynx") return "NordVPN"
         if (/^proton/.test(v.dev)) return "Proton VPN"
-        if (v.kind === "wireguard") return "WireGuard · " + v.dev
-        if (v.kind === "ppp") return "PPP · " + v.dev
+        // A VPN set up in NetworkManager keeps its own name
+        if (nmNames && nmNames[v.dev] && nmNames[v.dev] !== v.dev) return nmNames[v.dev]
+        if (v.type === "wireguard") return "WireGuard · " + v.dev
+        if (v.type === "openvpn") return "OpenVPN · " + v.dev
+        if (v.type === "ppp") return "PPP · " + v.dev
         return "VPN · " + v.dev
     }
 
@@ -917,6 +977,8 @@ PlasmoidItem {
                     s1.value = "Ethernet" + (main.speed > 0 ? " " + (main.speed >= 1000 ? (main.speed / 1000) + " Gbit/s" : main.speed + " Mbit/s") : "")
                     if (main.duplex === "half") { parts.push("half duplex"); s1.status = "warn" }
                 } else if (main.kind === "mobile") s1.value = "Mobile"
+                else if (main.kind === "ppp") s1.value = "PPP"
+                else if (main.kind === "bridge") s1.value = "Bridge"
                 else if (main.kind === "vpn") s1.value = "VPN tunnel"
                 else s1.value = "Connected"
                 parts.push(main.dev + (ip4 ? " " + ip4 : ""))
@@ -1000,6 +1062,19 @@ PlasmoidItem {
             }
         }
 
+        // VPN interfaces: found by the script, plus the tunnel that internet traffic leaves through
+        var vpns = L ? L.vpns.slice() : []
+        if (L && L.egress && L.egress.dev && L.ifaces[L.egress.dev] && L.ifaces[L.egress.dev].kind === "vpn") {
+            var listed = false
+            for (var vl = 0; vl < vpns.length; ++vl) if (vpns[vl].dev === L.egress.dev) listed = true
+            if (!listed) vpns.unshift({dev: L.egress.dev, kind: "vpn", type: ""})
+        }
+        function isVpn(dev) {
+            for (var q = 0; q < vpns.length; ++q) if (vpns[q].dev === dev) return true
+            return false
+        }
+        var vpnFull = !!(L && L.egress && isVpn(L.egress.dev))
+
         // Detail tiles
         var tiles = []
         var tIp = {key: "web", title: "Public IP", status: busy("web") ? "running" : "pending", value: busy("web") ? "…" : "—", detail: ""}
@@ -1020,25 +1095,32 @@ PlasmoidItem {
         tiles.push(tIp)
 
         var t6 = {key: "ipv6", title: "IPv6", status: busy("ipv6") ? "running" : "pending", value: busy("ipv6") ? "…" : "—", detail: ""}
-        var v6Broken = false
+        var v6Broken = false, v6Leak = false
         if (V6) {
+            var v6Works = !!((V6.ping && V6.ping.recv > 0) || V6.pub)
             if (!V6.addrs.length) { t6.status = "info"; t6.value = "Not provided"; t6.detail = "No IPv6 address from the network" }
             else if (!V6.routes) { t6.status = "info"; t6.value = "No route"; t6.detail = V6.addrs[0] }
+            else if (v6Works && vpnFull && V6.egress && !isVpn(V6.egress)) {
+                // IPv4 goes through the VPN, IPv6 around it: sites see the real address
+                t6.status = "warn"; t6.value = "Bypasses VPN"; t6.detail = "IPv6 leaves through " + V6.egress + ", not the VPN"; v6Leak = true
+            }
             else if (V6.ping && V6.ping.recv > 0) { t6.status = "ok"; t6.value = "Works · " + root.fmtMs(V6.ping.avg); t6.detail = V6.pub || V6.addrs[0] }
             else if (V6.pub) { t6.status = "ok"; t6.value = "Works"; t6.detail = V6.pub }
+            else if (vpnFull) { t6.status = "info"; t6.value = "Blocked by VPN"; t6.detail = "The VPN stops IPv6 so it cannot leak around the tunnel" }
             else { t6.status = "warn"; t6.value = "No connection"; t6.detail = "Address set, IPv6 traffic fails"; v6Broken = true }
         }
         tiles.push(t6)
 
         var tv = {key: "link", title: "VPN", status: busy("link") ? "running" : "pending", value: busy("link") ? "…" : "—", detail: ""}
         if (L) {
-            if (!L.vpns.length) { tv.status = "info"; tv.value = "Off"; tv.detail = "No VPN connection" }
+            if (!vpns.length) { tv.status = "info"; tv.value = "Off"; tv.detail = "No VPN connection" }
             else {
-                var viaVpn = false
-                for (var vi = 0; vi < L.vpns.length; ++vi) if (L.egress && L.egress.dev === L.vpns[vi].dev) viaVpn = true
                 tv.status = "ok"
-                tv.value = root.diagVpnName(L.vpns[0]) + (L.vpns.length > 1 ? " +" + (L.vpns.length - 1) : "")
-                tv.detail = viaVpn ? "Internet traffic goes through the VPN" : "Internet traffic goes around the VPN"
+                // The tunnel that carries the internet traffic first
+                var main0 = vpns[0]
+                for (var vv = 0; vv < vpns.length; ++vv) if (L.egress && vpns[vv].dev === L.egress.dev) main0 = vpns[vv]
+                tv.value = root.diagVpnName(main0, L.nmNames) + (vpns.length > 1 ? " +" + (vpns.length - 1) : "")
+                tv.detail = vpnFull ? "Internet traffic goes through the VPN" : "Internet traffic goes around the VPN"
             }
         }
         tiles.push(tv)
@@ -1097,6 +1179,8 @@ PlasmoidItem {
             verdict = {status: "warn", title: "Slow DNS", hint: "An uncached lookup takes " + s3.value + ": websites open slowly. Try DNS 1.1.1.1."}
         } else if (s5.status === "warn") {
             verdict = {status: "warn", title: "Websites respond slowly", hint: "A small HTTPS request took " + s5.value + "."}
+        } else if (v6Leak) {
+            verdict = {status: "warn", title: "IPv6 bypasses the VPN", hint: "IPv6 traffic leaves through " + V6.egress + ": websites can see your real IPv6 address. Turn IPv6 off or enable the VPN's leak protection."}
         } else if (v6Broken) {
             verdict = {status: "warn", title: "IPv6 does not work", hint: "An IPv6 address is set, but IPv6 traffic fails: some apps may be slow."}
         } else if (W && W.ntp === "no") {
@@ -1467,19 +1551,22 @@ PlasmoidItem {
         id: publicApi; engine: "executable"
         onNewData: function(source, data) {
             publicApi.disconnectSource(source); root.loading = false
-            try {
-                var d = JSON.parse(data.stdout || "")
-                if (!d.success) { root.errorText = "API error: " + (d.message || "unknown"); return }
-                root.errorText = ""
-                root.publicIp = d.ip || "—"; root.country = d.country || "—"; root.countryCode = d.country_code || ""
-                root.city = d.city || "—"; root.region = d.region || "—"
-                root.latitude = d.latitude !== undefined ? Number(d.latitude).toFixed(5) : "—"
-                root.longitude = d.longitude !== undefined ? Number(d.longitude).toFixed(5) : "—"
-                root.provider = d.connection && d.connection.isp ? d.connection.isp : "—"
-                root.asn = d.connection && d.connection.asn ? "AS" + d.connection.asn : "—"
-                root.timezone = d.timezone && d.timezone.id ? d.timezone.id : "—"
-                root.updated = Qt.formatTime(new Date(), "HH:mm:ss")
-            } catch (e) { root.errorText = "API error: invalid response" }
+            var r = root.parsePublicIp(data.stdout)
+            // On failure the last known data stays on screen
+            if (!r.ok) { root.errorText = r.error; return }
+            root.errorText = ""
+            root.ipSource = r.src
+            root.publicIp = r.ip
+            root.country = r.country || "—"
+            root.countryCode = r.countryCode
+            root.city = r.city || "—"
+            root.region = r.region || "—"
+            root.latitude = isFinite(r.lat) ? r.lat.toFixed(5) : "—"
+            root.longitude = isFinite(r.lon) ? r.lon.toFixed(5) : "—"
+            root.provider = r.isp || "—"
+            root.asn = r.asn || "—"
+            root.timezone = r.tz || "—"
+            root.updated = Qt.formatTime(new Date(), "HH:mm:ss")
         }
     }
 
@@ -1493,6 +1580,7 @@ PlasmoidItem {
                     var iface=all[i], addresses=iface.addr_info||[]
                     var item={iface:iface.ifname||"?",mac:iface.address||"—",ipv4:[],ipv4Prefix:[],ipv6:[],ipv6Prefix:[]}
                     for (var j=0;j<addresses.length;++j) { var a=addresses[j]; if(!a.local) continue; var p=a.prefixlen!==undefined?String(a.prefixlen):"—"; if(a.family==="inet6"){item.ipv6.push(a.local);item.ipv6Prefix.push(p)}else{item.ipv4.push(a.local);item.ipv4Prefix.push(p)} }
+                    if(iface.link_type==="loopback"||item.iface==="lo") continue
                     if(item.ipv4.length||item.ipv6.length) result.push(item)
                 }
             } catch(e) {}
@@ -1686,15 +1774,17 @@ PlasmoidItem {
         monitorApi.disconnectSource(source)
         var lines=String(data.stdout||"").split("\n")
         var states={}
+        var via={}
         for(var i=0;i<lines.length;++i){
             var line=lines[i].trim(); if(!line) continue
             var parts=line.split("\t"); if(parts.length<2) continue
             states[parts[0]]=parts[1]
+            via[parts[0]]=parts[2]||""
         }
         var list=root.watchedDevices.slice(0)
         for(var j=0;j<list.length;++j){
             var item=list[j]; var next=states[item.ip]||"DOWN"; var old=item.status||"Unknown"
-            item.status=next; item.lastCheck=Qt.formatTime(new Date(),"HH:mm:ss")
+            item.status=next; item.via=next==="UP"?(via[item.ip]||""):""; item.lastCheck=Qt.formatTime(new Date(),"HH:mm:ss")
             if(old!=="Unknown" && old!==next){
                 var title="Network device status changed"
                 var body=item.ip+" is now "+(next==="UP"?"online":"offline")
@@ -1956,9 +2046,9 @@ font.pixelSize:13 }
                         }
                         Text {
                             Layout.fillWidth: true
-                            text: root.errorText !== "" ? root.errorText : "Updated: " + root.updated + " · Auto-refresh: 10 min"
+                            text: root.errorText !== "" ? root.errorText : "Updated: " + root.updated + (root.ipSource !== "" ? " · " + root.ipSource : "") + " · Auto-refresh: 10 min"
                             color: root.errorText !== "" ? root.themeNegative : root.themeSecondary
-                            font.pixelSize: 9
+                            font.pixelSize: 10
                         }
                     }
 
@@ -2021,13 +2111,13 @@ font.pixelSize:13 }
                                                 Text {
                                                     text: (modelData.ipv4.length && modelData.ipv6.length) ? "IPv4 + IPv6" : (modelData.ipv4.length ? "IPv4" : "IPv6")
                                                     color: root.themeSecondary
-                                                    font.pixelSize: 9
+                                                    font.pixelSize: 10
                                                 }
                                                 TextEdit {
                                                     width: parent.width
                                                     text: "MAC: " + (modelData.mac || "—")
                                                     color: root.themeSecondary
-                                                    font.pixelSize: 9
+                                                    font.pixelSize: 10
                                                     readOnly: true
                                                     selectByMouse: true
                                                     selectByKeyboard: true
@@ -2106,7 +2196,7 @@ font.pixelSize:13 }
                             Text {
                                 text: "Missing: " + root.missingDependencies
                                 color: root.themeNegative
-                                font.pixelSize: 9
+                                font.pixelSize: 10
                                 Layout.fillWidth: true
                                 wrapMode: Text.Wrap
                             }
@@ -2116,7 +2206,7 @@ font.pixelSize:13 }
                             Layout.fillWidth: true
                             text: root.installCommand
                             color: root.themeNegative
-                            font.pixelSize: 9
+                            font.pixelSize: 10
                             readOnly: true
                             selectByMouse: true
                             selectByKeyboard: true
@@ -2155,7 +2245,7 @@ font.pixelSize:13 }
                         ColumnLayout {
                             Layout.fillWidth: true
                             spacing: 0
-                            Text { text: "Received"; color: root.themeSecondary; font.pixelSize: 8 }
+                            Text { text: "Received"; color: root.themeSecondary; font.pixelSize: 9 }
                             Text { text: root.trafficReceived; color: root.themeText; font.pixelSize: 13; font.bold: true }
                         }
                     }
@@ -2175,7 +2265,7 @@ font.pixelSize:13 }
                         ColumnLayout {
                             Layout.fillWidth: true
                             spacing: 0
-                            Text { text: "Sent"; color: root.themeSecondary; font.pixelSize: 8 }
+                            Text { text: "Sent"; color: root.themeSecondary; font.pixelSize: 9 }
                             Text { text: root.trafficSent; color: root.themeText; font.pixelSize: 13; font.bold: true }
                         }
                     }
@@ -2194,7 +2284,7 @@ font.pixelSize:13 }
                             spacing: 5
                             Image { source: Qt.resolvedUrl("../images/github.svg"); sourceSize.width: 18; sourceSize.height: 18; Layout.preferredWidth: 18; Layout.preferredHeight: 18 }
                             Text { text: "GitHub"; color: root.themeLink; font.pixelSize: 13; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: Qt.openUrlExternally("https://github.com/f1devbin") } }
-                            Text { text: "· v6.1.40"; color: root.themeSecondary; font.pixelSize: 9 }
+                            Text { text: "· v6.1.41"; color: root.themeSecondary; font.pixelSize: 10 }
                             Item { Layout.fillWidth: true }
                         }
                     }
@@ -2423,12 +2513,12 @@ font.pixelSize:13 }
                     RowLayout {
                         Layout.fillWidth: true
                         Text { text: "Network Scanner"; color: root.themeText; font.pixelSize: 13; font.bold: true; Layout.fillWidth: true }
-                        Text { text: root.scanLoading ? "Scanning…" : root.scanStatus; color: root.scanLoading ? root.themeHighlight : root.themeSecondary; font.pixelSize: 8 }
+                        Text { text: root.scanLoading ? "Scanning…" : root.scanStatus; color: root.scanLoading ? root.themeHighlight : root.themeSecondary; font.pixelSize: 9 }
                     }
                     Text {
                         text: "Finds every device on the network, including ones that ignore ping (they still answer ARP). A scan takes about 10 seconds."
                         color: root.themeSecondary
-                        font.pixelSize: 9
+                        font.pixelSize: 10
                         Layout.fillWidth: true
                         wrapMode: Text.Wrap
                     }
@@ -2488,7 +2578,7 @@ font.pixelSize:13 }
                         Text {
                             text: "Missing: " + root.missingDependencies
                             color: root.themeNegative
-                            font.pixelSize: 9
+                            font.pixelSize: 10
                             Layout.fillWidth: true
                             wrapMode: Text.Wrap
                         }
@@ -2503,7 +2593,7 @@ font.pixelSize:13 }
                         Layout.fillWidth: true
                         text: root.installCommand
                         color: root.themeNegative
-                        font.pixelSize: 9
+                        font.pixelSize: 10
                         readOnly: true
                         selectByMouse: true
                         selectByKeyboard: true
@@ -2524,9 +2614,9 @@ font.pixelSize:13 }
                             anchors.leftMargin: 8
                             anchors.rightMargin: 5
                             spacing: 6
-                            Text { Layout.fillWidth: true; text: "Device"; color: root.themeText; font.pixelSize: 9; font.bold: true }
-                            Text { Layout.preferredWidth: 112; text: "MAC address"; color: root.themeText; font.pixelSize: 9; font.bold: true }
-                            Text { Layout.preferredWidth: 44; text: "Monitor"; color: root.themeText; font.pixelSize: 9; font.bold: true; horizontalAlignment: Text.AlignHCenter }
+                            Text { Layout.fillWidth: true; text: "Device"; color: root.themeText; font.pixelSize: 10; font.bold: true }
+                            Text { Layout.preferredWidth: 112; text: "MAC address"; color: root.themeText; font.pixelSize: 10; font.bold: true }
+                            Text { Layout.preferredWidth: 44; text: "Monitor"; color: root.themeText; font.pixelSize: 10; font.bold: true; horizontalAlignment: Text.AlignHCenter }
                         }
                     }
 
@@ -2594,7 +2684,7 @@ font.pixelSize:13 }
                                                 Layout.fillWidth: true
                                                 text: hostRow.note
                                                 color: root.themeLink
-                                                font.pixelSize: 9
+                                                font.pixelSize: 10
                                                 elide: Text.ElideRight
                                             }
                                         }
@@ -2602,7 +2692,7 @@ font.pixelSize:13 }
                                             Layout.preferredWidth: 112
                                             text: modelData.mac
                                             color: root.themeText
-                                            font.pixelSize: 9
+                                            font.pixelSize: 10
                                             readOnly: true
                                             selectByMouse: true
                                             selectByKeyboard: true
@@ -2636,12 +2726,12 @@ font.pixelSize:13 }
                         Row {
                             spacing: 4
                             Rectangle { width: 7; height: 7; radius: 3.5; color: root.themePositive; anchors.verticalCenter: parent.verticalCenter }
-                            Text { text: "answers ping"; color: root.themeText; font.pixelSize: 8 }
+                            Text { text: "answers ping"; color: root.themeText; font.pixelSize: 9 }
                         }
                         Row {
                             spacing: 4
                             Rectangle { width: 7; height: 7; radius: 3.5; color: "#e0a030"; anchors.verticalCenter: parent.verticalCenter }
-                            Text { text: "ignores ping, found via ARP (Monitor pings, so it may show offline)"; color: root.themeText; font.pixelSize: 8 }
+                            Text { text: "ignores ping, found via ARP"; color: root.themeText; font.pixelSize: 9 }
                         }
                     }
                 }
@@ -2656,8 +2746,8 @@ font.pixelSize:13 }
                         Text { text: "Network Diagnostics"; color: root.themeText; font.pixelSize: 13; font.bold: true; Layout.fillWidth: true }
                         Text {
                             text: root.diagRunning ? "Checking…" : (root.diagUpdated !== "" ? "Checked " + root.diagUpdated : "")
-                            color: root.diagRunning ? root.themeHighlight : root.alpha(root.themeText, 0.8)
-                            font.pixelSize: 9
+                            color: root.diagRunning ? root.themeHighlight : root.themeSecondary
+                            font.pixelSize: 10
                         }
                     }
 
@@ -2796,7 +2886,7 @@ font.pixelSize:13 }
                                             Row {
                                                 spacing: 5
                                                 Rectangle { width: 7; height: 7; radius: 3.5; anchors.verticalCenter: parent.verticalCenter; color: root.diagTint(diagTile.tile.status) }
-                                                Text { text: diagTile.tile.title; color: root.alpha(root.themeText, 0.85); font.pixelSize: 9 }
+                                                Text { text: diagTile.tile.title; color: root.alpha(root.themeText, 0.85); font.pixelSize: 10 }
                                             }
                                             TextEdit {
                                                 width: parent.width
@@ -2815,7 +2905,7 @@ font.pixelSize:13 }
                                                 visible: text !== ""
                                                 text: diagTile.tile.detail
                                                 color: root.alpha(root.themeText, 0.85)
-                                                font.pixelSize: 9
+                                                font.pixelSize: 10
                                                 wrapMode: TextEdit.Wrap
                                                 readOnly: true
                                                 selectByMouse: true
@@ -2855,7 +2945,7 @@ font.pixelSize:13 }
                                                 selectByKeyboard: true
                                                 cursorVisible: false
                                             }
-                                            Text { text: modelData.name; color: root.themeLink; font.pixelSize: 9; elide: Text.ElideRight; Layout.fillWidth: true }
+                                            Text { text: modelData.name; color: root.themeLink; font.pixelSize: 10; elide: Text.ElideRight; Layout.fillWidth: true }
                                             Text {
                                                 text: modelData.reached === 2 ? "unreachable" : (modelData.rtt >= 0 ? root.fmtMs(modelData.rtt) : "—")
                                                 color: modelData.reached === 2 ? "#ff4040" : root.themeText
@@ -2889,7 +2979,7 @@ font.pixelSize:13 }
                         Text {
                             text: root.speedLoading || root.speedUpdated === "" ? (root.speedStatus !== "" ? root.speedStatus : "Cloudflare · IPv4") : root.speedStatus + " · " + root.speedUpdated
                             color: root.speedPhase === "error" ? root.themeNegative : (root.speedLoading ? root.themeHighlight : root.themeSecondary)
-                            font.pixelSize: 8
+                            font.pixelSize: 9
                         }
                     }
 
@@ -2946,7 +3036,7 @@ font.pixelSize:13 }
                                     }
                                 }
                                 ctx.fillStyle = root.cssColor(root.themeText, 0.65)
-                                ctx.font = "9px sans-serif"
+                                ctx.font = "10px sans-serif"
                                 ctx.textAlign = "center"
                                 ctx.textBaseline = "middle"
                                 var marks = [0, 10, 50, 100, 250, 500, 1000]
@@ -3030,7 +3120,7 @@ font.pixelSize:13 }
                                             color: tint
                                             anchors.verticalCenter: parent.verticalCenter
                                         }
-                                        Text { text: modelData.title; color: root.themeText; font.pixelSize: 9 }
+                                        Text { text: modelData.title; color: root.themeText; font.pixelSize: 10 }
                                     }
                                     Row {
                                         spacing: 3
@@ -3046,14 +3136,14 @@ font.pixelSize:13 }
                                         Text {
                                             text: modelData.key === "ping" ? "ms" : "Mbps"
                                             color: root.themeText
-                                            font.pixelSize: 9
+                                            font.pixelSize: 10
                                             anchors.baseline: tileValue.baseline
                                         }
                                     }
                                     Text {
                                         text: modelData.key === "ping" && root.speedJitterMs >= 0 ? "jitter " + root.speedJitterMs.toFixed(1) + " ms" : ""
                                         color: root.themeText
-                                        font.pixelSize: 8
+                                        font.pixelSize: 9
                                     }
                                 }
                             }
@@ -3065,10 +3155,10 @@ font.pixelSize:13 }
                         Text {
                             text: root.speedServer !== "" ? "Server: Cloudflare " + root.speedServer : "Server: Cloudflare"
                             color: root.themeSecondary
-                            font.pixelSize: 8
+                            font.pixelSize: 9
                             Layout.fillWidth: true
                         }
-                        Text { text: "IPv4 · 4 streams"; color: root.themeSecondary; font.pixelSize: 8 }
+                        Text { text: "IPv4 · 4 streams"; color: root.themeSecondary; font.pixelSize: 9 }
                     }
 
                     Controls.Button {
@@ -3103,12 +3193,12 @@ font.pixelSize:13 }
                     RowLayout {
                         Layout.fillWidth: true
                         Text { text: "Network Apps"; color: root.themeText; font.pixelSize: 13; font.bold: true; Layout.fillWidth: true }
-                        Text { text: root.appTrafficLoading ? "Reading…" : root.appTrafficStatus; color: root.appTrafficLoading ? root.themeHighlight : root.themeSecondary; font.pixelSize: 8 }
+                        Text { text: root.appTrafficLoading ? "Reading…" : root.appTrafficStatus; color: root.appTrafficLoading ? root.themeHighlight : root.themeSecondary; font.pixelSize: 9 }
                     }
                     Text {
                         text: "Applications with active network connections · TCP and UDP"
                         color: root.themeSecondary
-                        font.pixelSize: 9
+                        font.pixelSize: 10
                         Layout.fillWidth: true
                         wrapMode: Text.Wrap
                     }
@@ -3122,10 +3212,10 @@ font.pixelSize:13 }
                         RowLayout {
                             anchors.fill: parent
                             anchors.leftMargin: 8; anchors.rightMargin: 8
-                            Text { text: "Application"; color: root.themeSecondary; font.pixelSize: 8; Layout.fillWidth: true }
-                            Text { text: "TCP"; color: root.themeSecondary; font.pixelSize: 8; Layout.preferredWidth: 42; horizontalAlignment: Text.AlignRight }
-                            Text { text: "UDP"; color: root.themeSecondary; font.pixelSize: 8; Layout.preferredWidth: 42; horizontalAlignment: Text.AlignRight }
-                            Text { text: "Total"; color: root.themeSecondary; font.pixelSize: 8; Layout.preferredWidth: 48; horizontalAlignment: Text.AlignRight }
+                            Text { text: "Application"; color: root.themeSecondary; font.pixelSize: 9; Layout.fillWidth: true }
+                            Text { text: "TCP"; color: root.themeSecondary; font.pixelSize: 9; Layout.preferredWidth: 42; horizontalAlignment: Text.AlignRight }
+                            Text { text: "UDP"; color: root.themeSecondary; font.pixelSize: 9; Layout.preferredWidth: 42; horizontalAlignment: Text.AlignRight }
+                            Text { text: "Total"; color: root.themeSecondary; font.pixelSize: 9; Layout.preferredWidth: 48; horizontalAlignment: Text.AlignRight }
                         }
                     }
                     Flickable {
@@ -3169,11 +3259,11 @@ font.pixelSize:13 }
                                                 anchors.topMargin: 4
                                                 height: 20
                                                 Text { text: appRow.idle ? "" : (appRow.expanded ? "⌄" : "›"); color: root.themeSecondary; font.pixelSize: 14; Layout.preferredWidth: 22; horizontalAlignment: Text.AlignHCenter }
-                                                Text { text: modelData.display; color: root.themeText; opacity: appRow.idle ? 0.7 : 1; font.pixelSize: 10; font.bold: true; elide: Text.ElideRight; Layout.fillWidth: true }
-                                                Text { text: appRow.idle ? "not connected" : "PID " + modelData.pid; color: root.themeSecondary; font.pixelSize: 8; Layout.preferredWidth: 62; horizontalAlignment: Text.AlignRight }
-                                                Text { text: modelData.tcp; color: root.themeText; font.pixelSize: 8; Layout.preferredWidth: 42; horizontalAlignment: Text.AlignRight }
-                                                Text { text: modelData.udp; color: root.themeText; font.pixelSize: 8; Layout.preferredWidth: 42; horizontalAlignment: Text.AlignRight }
-                                                Text { text: modelData.total; color: root.themeText; font.pixelSize: 8; Layout.preferredWidth: 48; horizontalAlignment: Text.AlignRight }
+                                                Text { text: modelData.display; color: root.themeText; opacity: appRow.idle ? 0.85 : 1; font.pixelSize: 10; font.bold: true; elide: Text.ElideRight; Layout.fillWidth: true }
+                                                Text { text: appRow.idle ? "not connected" : "PID " + modelData.pid; color: root.themeSecondary; font.pixelSize: 9; Layout.preferredWidth: 62; horizontalAlignment: Text.AlignRight }
+                                                Text { text: modelData.tcp; color: root.themeText; font.pixelSize: 9; Layout.preferredWidth: 42; horizontalAlignment: Text.AlignRight }
+                                                Text { text: modelData.udp; color: root.themeText; font.pixelSize: 9; Layout.preferredWidth: 42; horizontalAlignment: Text.AlignRight }
+                                                Text { text: modelData.total; color: root.themeText; font.pixelSize: 9; Layout.preferredWidth: 48; horizontalAlignment: Text.AlignRight }
                                             }
                                             // Second line: current speed (3 s sample) and traffic since boot
                                             Row {
@@ -3184,10 +3274,10 @@ font.pixelSize:13 }
                                                     visible: modelData.rx >= 0
                                                     spacing: 3
                                                     Image { source: Qt.resolvedUrl("../images/arrow-down.svg"); sourceSize.width: 8; sourceSize.height: 10; anchors.verticalCenter: parent.verticalCenter }
-                                                    Text { text: root.formatBytes(modelData.rx) + "/s"; color: root.themeText; font.pixelSize: 8; anchors.verticalCenter: parent.verticalCenter }
+                                                    Text { text: root.formatBytes(modelData.rx) + "/s"; color: root.themeText; font.pixelSize: 9; anchors.verticalCenter: parent.verticalCenter }
                                                     Item { width: 4; height: 1 }
                                                     Image { source: Qt.resolvedUrl("../images/arrow-up.svg"); sourceSize.width: 8; sourceSize.height: 10; anchors.verticalCenter: parent.verticalCenter }
-                                                    Text { text: root.formatBytes(modelData.tx) + "/s"; color: root.themeText; font.pixelSize: 8; anchors.verticalCenter: parent.verticalCenter }
+                                                    Text { text: root.formatBytes(modelData.tx) + "/s"; color: root.themeText; font.pixelSize: 9; anchors.verticalCenter: parent.verticalCenter }
                                                 }
                                                 Rectangle {
                                                     visible: modelData.rx >= 0 && appRow.usage !== undefined
@@ -3198,12 +3288,12 @@ font.pixelSize:13 }
                                                 Row {
                                                     visible: appRow.usage !== undefined
                                                     spacing: 3
-                                                    Text { text: "Since boot"; color: root.themeLink; font.pixelSize: 8; anchors.verticalCenter: parent.verticalCenter }
+                                                    Text { text: "Since boot"; color: root.themeLink; font.pixelSize: 9; anchors.verticalCenter: parent.verticalCenter }
                                                     Image { source: Qt.resolvedUrl("../images/arrow-down.svg"); sourceSize.width: 8; sourceSize.height: 10; anchors.verticalCenter: parent.verticalCenter }
-                                                    Text { text: appRow.usage ? root.formatBytes(appRow.usage.rx) : ""; color: root.themeText; font.pixelSize: 8; font.bold: true; anchors.verticalCenter: parent.verticalCenter }
+                                                    Text { text: appRow.usage ? root.formatBytes(appRow.usage.rx) : ""; color: root.themeText; font.pixelSize: 9; font.bold: true; anchors.verticalCenter: parent.verticalCenter }
                                                     Item { width: 4; height: 1 }
                                                     Image { source: Qt.resolvedUrl("../images/arrow-up.svg"); sourceSize.width: 8; sourceSize.height: 10; anchors.verticalCenter: parent.verticalCenter }
-                                                    Text { text: appRow.usage ? root.formatBytes(appRow.usage.tx) : ""; color: root.themeText; font.pixelSize: 8; font.bold: true; anchors.verticalCenter: parent.verticalCenter }
+                                                    Text { text: appRow.usage ? root.formatBytes(appRow.usage.tx) : ""; color: root.themeText; font.pixelSize: 9; font.bold: true; anchors.verticalCenter: parent.verticalCenter }
                                                 }
                                             }
                                             MouseArea {
@@ -3221,16 +3311,16 @@ font.pixelSize:13 }
                                             spacing: 2
                                             Row {
                                                 width: parent.width; height: 18
-                                                Text { text: "Protocol"; color: root.themeSecondary; font.pixelSize: 7; width: 52 }
-                                                Text { text: "Remote address"; color: root.themeSecondary; font.pixelSize: 7; width: parent.width - 52 - 72 - 86 }
-                                                Text { text: "Port"; color: root.themeSecondary; font.pixelSize: 7; width: 72; horizontalAlignment: Text.AlignRight }
-                                                Text { text: "Activity"; color: root.themeSecondary; font.pixelSize: 7; width: 86; horizontalAlignment: Text.AlignRight }
+                                                Text { text: "Protocol"; color: root.themeSecondary; font.pixelSize: 9; width: 52 }
+                                                Text { text: "Remote address"; color: root.themeSecondary; font.pixelSize: 9; width: parent.width - 52 - 72 - 86 }
+                                                Text { text: "Port"; color: root.themeSecondary; font.pixelSize: 9; width: 72; horizontalAlignment: Text.AlignRight }
+                                                Text { text: "Activity"; color: root.themeSecondary; font.pixelSize: 9; width: 86; horizontalAlignment: Text.AlignRight }
                                             }
                                             Repeater {
                                                 model: modelData.connections
                                                 delegate: Row {
                                                     width: parent.width; height: 22
-                                                    Text { text: modelData.protocol; color: root.themeText; font.pixelSize: 8; width: 52 }
+                                                    Text { text: modelData.protocol; color: root.themeText; font.pixelSize: 9; width: 52 }
                                                     // "×N": N connections to this address and port
                                                     Item {
                                                         width: Math.max(70, parent.width - 52 - 72 - 86)
@@ -3239,7 +3329,7 @@ font.pixelSize:13 }
                                                             id: connAddress
                                                             text: modelData.address
                                                             color: root.themeText
-                                                            font.pixelSize: 8
+                                                            font.pixelSize: 9
                                                             elide: Text.ElideMiddle
                                                             width: Math.min(implicitWidth, parent.width - (connCount.visible ? connCount.implicitWidth + 5 : 0))
                                                         }
@@ -3250,12 +3340,12 @@ font.pixelSize:13 }
                                                             visible: modelData.count > 1
                                                             text: "×" + modelData.count
                                                             color: root.themeLink
-                                                            font.pixelSize: 8
+                                                            font.pixelSize: 9
                                                             font.bold: true
                                                         }
                                                     }
-                                                    Text { text: modelData.port; color: root.themeText; font.pixelSize: 8; width: 72; horizontalAlignment: Text.AlignRight }
-                                                    Text { text: modelData.state; color: root.themePositive; font.pixelSize: 8; width: 86; horizontalAlignment: Text.AlignRight }
+                                                    Text { text: modelData.port; color: root.themeText; font.pixelSize: 9; width: 72; horizontalAlignment: Text.AlignRight }
+                                                    Text { text: modelData.state; color: root.themePositive; font.pixelSize: 9; width: 86; horizontalAlignment: Text.AlignRight }
                                                 }
                                             }
                                         }
@@ -3270,7 +3360,7 @@ font.pixelSize:13 }
                             : "Speed: 3-second sample. Since boot: counted while Plasma runs (from login), updated every 2 minutes"
                               + (root.appUsageUpdated !== "" ? ", last at " + root.appUsageUpdated : "") + ". Source: KDE System Monitor helper."
                         color: root.themeSecondary
-                        font.pixelSize: 8
+                        font.pixelSize: 9
                         Layout.fillWidth: true
                         wrapMode: Text.Wrap
                     }
@@ -3316,7 +3406,7 @@ font.pixelSize:13 }
                     Text {
                         text: root.watchedDevices.length ? "Status is checked every 30 seconds." : "Add an IP or use Watch from Network Scanner."
                         color: root.themeSecondary
-                        font.pixelSize: 9
+                        font.pixelSize: 10
                         Layout.fillWidth: true
                         wrapMode: Text.Wrap
                     }
@@ -3359,9 +3449,9 @@ font.pixelSize:13 }
                                                 Layout.fillWidth: true
                                             }
                                             Text {
-                                                text: (modelData.mac && modelData.mac !== "—" ? modelData.mac + " · " : "") + "checked " + modelData.lastCheck
+                                                text: (modelData.mac && modelData.mac !== "—" ? modelData.mac + " · " : "") + "checked " + modelData.lastCheck + (modelData.via === "arp" ? " · ignores ping, answers ARP" : "")
                                                 color: root.themeSecondary
-                                                font.pixelSize: 8
+                                                font.pixelSize: 9
                                                 Layout.fillWidth: true
                                             }
                                         }

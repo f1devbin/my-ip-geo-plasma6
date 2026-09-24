@@ -1,12 +1,20 @@
 # My IP & Geo
 
-Version 6.1.40
+Version 6.1.41
 
 Compact KDE Plasma 6 widget for public IP/geolocation, local network information and network tools.
 
 ## Requirements
 - KDE Plasma 6 (tested on Kubuntu 26.04). Nothing to install and no root rights: the widget uses `curl`, `ip`, `ping`, `ss` and standard shell tools, all present on Kubuntu by default.
 - Used when present, never required: `iw` or NetworkManager (Wi-Fi details), `resolvectl` (DNS servers), `notify-send` (notifications, D-Bus is used otherwise), KDE System Monitor's `ksgrd_network_helper` (per-application traffic).
+
+## v6.1.41
+- VPN detection fixed for OpenVPN on current kernels: with data channel offload (the kernel `ovpn` driver) the interface is still called `tun0` but is not a tun device, so v6.1.40 showed "VPN Off" while RiseupVPN was connected. Any tunnel without a link layer is recognised now, and the interface that carries the internet traffic always counts. The VPN tile names the VPN (NetworkManager connection name, OpenVPN, WireGuard, Cloudflare WARP, Tailscale …). PPPoE as the only connection is not taken for a VPN. The header shield uses the same check.
+- IPv6 behind a VPN: IPv6 blocked by the VPN is normal leak protection and shown as "Blocked by VPN" without a warning; IPv6 that leaves around the VPN is a warning ("IPv6 bypasses the VPN": websites can see the real address).
+- Readability: secondary text is now close to the main text colour instead of the theme's dark grey; the smallest text grew from 7–8 px to 9 px, 9 px text to 10 px.
+- Public IP: when ipwho.is does not answer, ipapi.co and then Cloudflare's trace page (address and country code) are used. The source is shown next to the update time; when every service fails, a plain message replaces "API error: invalid response" and the last data stays. Script: `contents/code/publicip.sh`.
+- Local IPs: the loopback interface `lo` is no longer listed.
+- Monitor: all devices are checked at the same time. A device that ignores ping but answers ARP (phones, Windows with a firewall) counts as online and is marked "ignores ping, answers ARP", so it no longer produces false "offline" notifications. Script: `contents/code/monitor.sh`.
 
 ## v6.1.40
 - Diagnostics redesigned. It checks the whole chain — connection → router → DNS → internet → websites — and names the first broken link with a plain hint (for example "DNS does not work … Cloudflare DNS 1.1.1.1 works: set it as DNS server"), or shows "Everything works" with the connection quality (latency, jitter, packet loss). Warnings: weak Wi-Fi, packet loss, high or unstable latency, slow DNS, DNS answering for names that do not exist, broken IPv6, unsynchronized clock.

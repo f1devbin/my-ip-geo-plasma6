@@ -27,29 +27,71 @@ trap 'rm -rf "$tmp"' EXIT
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# Network interfaces in sysfs (overridable only for tests)
+NET=${MYIPGEO_SYSFS_NET:-/sys/class/net}
+
 # Microseconds from bash's $EPOCHREALTIME (no extra process per time stamp)
 now_us() { local t=${EPOCHREALTIME/./}; echo $((10#$t)); }
 
-# Active VPN interfaces: "<dev> <kind>". Tunnels (OpenVPN, Cloudflare WARP, WireGuard) report
-# operstate "unknown", so the UP and LOWER_UP flags plus an assigned address decide.
+# Interface type from sysfs: wifi | ethernet | vpn | ppp | mobile | bridge | loopback | other
+iface_kind() {
+    local p=$NET/$1 devtype type
+    devtype=$(sed -n 's/^DEVTYPE=//p' "$p/uevent" 2>/dev/null)
+    type=$(cat "$p/type" 2>/dev/null)
+    case "$devtype" in
+        wlan) echo wifi; return ;;
+        # WireGuard; OpenVPN with data channel offload (kernel "ovpn" driver, ovpn-dco module)
+        wireguard|ovpn*) echo vpn; return ;;
+        wwan) echo mobile; return ;;
+        bridge) echo bridge; return ;;
+    esac
+    if [ -d "$p/wireless" ] || [ -e "$p/phy80211" ]; then echo wifi; return; fi
+    # tun/tap: OpenVPN, Cloudflare WARP, Tailscale, ZeroTier, wireguard-go
+    if [ -e "$p/tun_flags" ]; then echo vpn; return; fi
+    case "$type" in
+        772) echo loopback ;;
+        512) echo ppp ;;
+        65534) echo vpn ;;  # no link layer: tunnels
+        *) case "$1" in
+               wg*|tun*|tap*|nordlynx|proton*|CloudflareWARP|tailscale*|zt*|ipsec*|vti*|gpd*|vpn*) echo vpn ;;
+               *) if [ "$type" = 1 ]; then echo ethernet; else echo other; fi ;;
+           esac ;;
+    esac
+}
+
+# What carries a VPN interface: wireguard | openvpn (kernel data channel offload) | tun | ppp | tunnel
+vpn_type() {
+    local p=$NET/$1 devtype
+    devtype=$(sed -n 's/^DEVTYPE=//p' "$p/uevent" 2>/dev/null)
+    case "$devtype" in wireguard) echo wireguard; return ;; ovpn*) echo openvpn; return ;; esac
+    if [ -e "$p/tun_flags" ]; then echo tun; return; fi
+    if [ "$(cat "$p/type" 2>/dev/null)" = 512 ]; then echo ppp; return; fi
+    echo tunnel
+}
+
+# Active VPN interfaces: "<dev> <kind> <type>". Tunnels report operstate "unknown", so the UP and
+# LOWER_UP flags plus an assigned address decide. PPP is a VPN (PPTP, L2TP) only when the
+# internet also has a route through another interface; otherwise it is the connection itself.
 vpn_ifaces() {
-    local p dev kind flags
-    for p in /sys/class/net/*; do
+    local p dev kind flags other egress
+    other=$({ ip -4 route show default; ip -6 route show default; } 2>/dev/null | sed -n 's/.* dev \([^ ]*\).*/\1/p' | grep -v '^ppp' | head -n 1)
+    egress=$(ip -4 route get "$TARGET" 2>/dev/null | sed -n 's/.* dev \([^ ]*\).*/\1/p' | head -n 1)
+    for p in "$NET"/*; do
         dev=${p##*/}
-        kind=""
-        if grep -qs '^DEVTYPE=wireguard' "$p/uevent"; then kind=wireguard
-        elif [ -e "$p/tun_flags" ]; then kind=tun
-        elif [ "$(cat "$p/type" 2>/dev/null)" = 512 ]; then kind=ppp
-        else
-            case "$dev" in wg*|nordlynx|proton*|CloudflareWARP|tailscale*|zt*|ipsec*|vti*|gpd*) kind=vpn ;; esac
-        fi
-        [ -n "$kind" ] || continue
+        kind=$(iface_kind "$dev")
+        case "$kind" in
+            vpn) ;;
+            ppp) [ -n "$other" ] || continue ;;
+            *) continue ;;
+        esac
+        # Internet traffic goes through it: active whatever the flags say
+        if [ "$dev" = "$egress" ]; then echo "$dev $kind $(vpn_type "$dev")"; continue; fi
         flags=$(ip -o link show dev "$dev" 2>/dev/null) || continue
         flags=${flags#*<}; flags=",${flags%%>*},"
         case "$flags" in *,UP,*) ;; *) continue ;; esac
         case "$flags" in *,LOWER_UP,*) ;; *) continue ;; esac
         ip -o addr show dev "$dev" 2>/dev/null | awk '$3 == "inet" || ($3 == "inet6" && $4 !~ /^fe80/) { f = 1 } END { exit !f }' || continue
-        echo "$dev $kind"
+        echo "$dev $kind $(vpn_type "$dev")"
     done
 }
 
@@ -95,15 +137,10 @@ check_dnsmap() {
 }
 
 iface_info() {
-    local dev=$1 p=/sys/class/net/$1 kind=other devtype type
+    local dev=$1 p=$NET/$1 kind devtype
     [ -d "$p" ] || return
+    kind=$(iface_kind "$dev")
     devtype=$(sed -n 's/^DEVTYPE=//p' "$p/uevent" 2>/dev/null)
-    type=$(cat "$p/type" 2>/dev/null)
-    if [ -d "$p/wireless" ] || [ -e "$p/phy80211" ] || [ "$devtype" = wlan ]; then kind=wifi
-    elif [ "$devtype" = wireguard ] || [ -e "$p/tun_flags" ] || [ "$type" = 512 ]; then kind=vpn
-    elif [ "$devtype" = wwan ]; then kind=mobile
-    elif [ "$type" = 1 ]; then kind=ethernet
-    fi
     echo "IFACE $dev kind=$kind devtype=${devtype:--} operstate=$(cat "$p/operstate" 2>/dev/null) mtu=$(cat "$p/mtu" 2>/dev/null) speed=$(cat "$p/speed" 2>/dev/null) duplex=$(cat "$p/duplex" 2>/dev/null) mac=$(cat "$p/address" 2>/dev/null)"
     ip -o addr show dev "$dev" 2>/dev/null | awk -v d="$dev" '$3 == "inet" || $3 == "inet6" { print "ADDR", d, $3, $4 }'
     if [ "$kind" = wifi ]; then
@@ -126,7 +163,10 @@ check_link() {
         iface_info "$dev"
     done
     vpn_ifaces | sed 's/^/VPN /'
-    have nmcli && nmcli -t -f CONNECTIVITY general 2>/dev/null | head -n 1 | sed 's/^/NMCONN /'
+    if have nmcli; then
+        nmcli -t -f CONNECTIVITY general 2>/dev/null | head -n 1 | sed 's/^/NMCONN /'
+        nmcli -t -f DEVICE,NAME connection show --active 2>/dev/null | sed 's/^/NMACTIVE /'
+    fi
 }
 
 check_gateway() {
@@ -188,6 +228,8 @@ check_web() {
 check_ipv6() {
     ip -6 addr show scope global 2>/dev/null | awk '$1 == "inet6" { print "ADDR6", $2 }'
     ip -6 route show default 2>/dev/null | sed 's/^/ROUTE6 /'
+    # Which interface IPv6 traffic leaves through (does it go around a VPN?)
+    ip -6 route get 2606:4700:4700::1111 2>/dev/null | head -n 1 | sed 's/^/EGRESS6 /'
     if ip -6 route show default 2>/dev/null | grep -q . && ip -6 addr show scope global 2>/dev/null | grep -q inet6; then
         ping -6 -n -c 4 -i 0.2 -W 1 2606:4700:4700::1111 > "$tmp/ping6" 2>&1 &
         curl -6 -s --max-time 5 "$TRACE_URL" 2>/dev/null | sed -n 's/^ip=/PUBLIC6 /p' > "$tmp/pub6" &
@@ -200,7 +242,7 @@ check_ipv6() {
 check_mtu() {
     local dev s
     dev=$(ip -4 route get "$TARGET" 2>/dev/null | sed -n 's/.* dev \([^ ]*\).*/\1/p' | head -n 1)
-    [ -n "$dev" ] && echo "DEVMTU $dev $(cat "/sys/class/net/$dev/mtu" 2>/dev/null)"
+    [ -n "$dev" ] && echo "DEVMTU $dev $(cat "$NET/$dev/mtu" 2>/dev/null)"
     # A full-size packet that must not be fragmented: a smaller link on the way answers with its MTU
     echo "__PMTU__"
     ping -n -M do -s 1472 -c 2 -i 0.2 -W 1 "$TARGET" 2>&1 | head -n 6
@@ -258,5 +300,6 @@ case "$1" in
     ipv6) check_ipv6 ;;
     mtu) check_mtu ;;
     route) check_route ;;
+    __source) ;;  # tests load the functions only
     *) echo "usage: netdiag.sh status|dnsmap|link|gateway|dns|internet|web|ipv6|mtu|route" >&2; exit 2 ;;
 esac
