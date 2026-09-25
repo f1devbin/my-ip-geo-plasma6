@@ -60,6 +60,7 @@ PlasmoidItem {
     property var portScans: ({})                 // ip -> {mode, range, state, scanned, ports:[{port,service}], error}
     property string portScanIp: ""               // host being scanned right now (one at a time)
     property int portScanSeq: 0
+    property string portScanSource: ""
     property string systemUptime: "—"
 
     property color themeBackgroundRaw: Kirigami.Theme.backgroundColor
@@ -496,11 +497,11 @@ PlasmoidItem {
     // ----- Scanner: per-host TCP port check (portscan.sh) -----
     function portEntry(ip) {
         var e = root.portScans[ip]
-        return e ? e : {mode: "common", range: "1-1024", state: "idle", scanned: 0, ports: [], error: ""}
+        return e ? e : {range: "1-1024", state: "idle", scanned: 0, ports: [], error: "", secs: 0}
     }
     function setPortScan(ip, patch) {
         var e = root.portEntry(ip)
-        var merged = {mode: e.mode, range: e.range, state: e.state, scanned: e.scanned, ports: e.ports, error: e.error}
+        var merged = {range: e.range, state: e.state, scanned: e.scanned, ports: e.ports, error: e.error, secs: e.secs || 0}
         for (var k in patch) if (patch.hasOwnProperty(k)) merged[k] = patch[k]
         var next = {}
         for (var i in root.portScans) if (root.portScans.hasOwnProperty(i)) next[i] = root.portScans[i]
@@ -513,7 +514,6 @@ PlasmoidItem {
         if (next[ip]) delete next[ip]; else next[ip] = true
         root.scanExpanded = next
     }
-    function setPortMode(ip, mode) { root.setPortScan(ip, {mode: mode}) }
     function setPortRange(ip, range) { root.setPortScan(ip, {range: range}) }
 
     // "1-1024" clamped to 1..65535, low value first; "" when it is not a valid range
@@ -524,12 +524,15 @@ PlasmoidItem {
         if (a > b) { var t = a; a = b; b = t }
         return a + "-" + b
     }
+    function rangeCount(str) {
+        var r = root.sanitizeRange(str)
+        if (r === "") return 0
+        var ab = r.split("-")
+        return +ab[1] - +ab[0] + 1
+    }
     // The spec string passed to portscan.sh
     function portSpec(ip) {
-        var e = root.portEntry(ip)
-        if (e.mode === "common") return "common"
-        if (e.mode === "wellknown") return "1-1024"
-        return root.sanitizeRange(e.range)
+        return root.sanitizeRange(root.portEntry(ip).range)
     }
     function runPortScan(ip) {
         if (root.portScanIp !== "") return
@@ -539,17 +542,20 @@ PlasmoidItem {
         if (!safeIp) return
         root.portScanIp = ip
         root.portScanSeq += 1
-        root.setPortScan(ip, {state: "running", ports: [], scanned: 0, error: ""})
-        portScanApi.connectSource("bash " + root.codePath("portscan.sh") + " " + safeIp + " " + spec + " " + root.portScanSeq)
+        root.setPortScan(ip, {state: "running", ports: [], scanned: 0, error: "", secs: 0})
+        root.portScanSource = "bash " + root.codePath("portscan.sh") + " " + safeIp + " " + spec + " " + root.portScanSeq
+        portScanApi.connectSource(root.portScanSource)
+        portScanWatchdog.restart()
     }
     function parsePortScan(text) {
-        var out = {scanned: 0, ports: [], done: false, error: ""}
+        var out = {scanned: 0, ports: [], done: false, error: "", secs: 0}
         var lines = String(text || "").split("\n")
         for (var i = 0; i < lines.length; ++i) {
             var f = lines[i].split(/\s+/)
             if (f[0] === "SCAN") out.scanned = +f[2] || 0
             else if (f[0] === "OPEN" && f[1]) out.ports.push({port: +f[1], service: f[2] || ""})
             else if (f[0] === "DONE") out.done = true
+            else if (f[0] === "TIME") out.secs = parseFloat(f[1]) || 0
             else if (f[0] === "ERROR") out.error = lines[i].substring(6).trim() || "scan failed"
         }
         return out
@@ -2113,12 +2119,28 @@ PlasmoidItem {
         id: portScanApi; engine: "executable"
         onNewData: function(source, data) {
             portScanApi.disconnectSource(source)
+            portScanWatchdog.stop()
             var ip = root.portScanIp
             root.portScanIp = ""
+            root.portScanSource = ""
             if (!ip) return
             var r = root.parsePortScan(data.stdout)
             if (r.error) { root.setPortScan(ip, {state: "error", error: r.error}); return }
-            root.setPortScan(ip, {state: "done", scanned: r.scanned, ports: r.ports, error: ""})
+            if (!r.done) { root.setPortScan(ip, {state: "error", error: "Scan did not finish"}); return }
+            root.setPortScan(ip, {state: "done", scanned: r.scanned, ports: r.ports, error: "", secs: r.secs})
+        }
+    }
+    // portscan.sh stops itself after 170 s; this only frees the Scan buttons if the process never returns
+    Timer {
+        id: portScanWatchdog
+        interval: 200000
+        repeat: false
+        onTriggered: {
+            if (root.portScanSource !== "") portScanApi.disconnectSource(root.portScanSource)
+            var ip = root.portScanIp
+            root.portScanIp = ""
+            root.portScanSource = ""
+            if (ip) root.setPortScan(ip, {state: "error", error: "Scan did not finish"})
         }
     }
     Plasma5Support.DataSource { id: monitorApi; engine:"executable"; onNewData:function(source,data){
@@ -2674,7 +2696,7 @@ font.pixelSize:13 }
                             spacing: 5
                             Image { source: Qt.resolvedUrl("../images/github.svg"); sourceSize.width: 18; sourceSize.height: 18; Layout.preferredWidth: 18; Layout.preferredHeight: 18 }
                             Text { text: "GitHub"; color: root.themeLink; font.pixelSize: 13; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: Qt.openUrlExternally("https://github.com/f1devbin") } }
-                            Text { text: "· v6.1.45"; color: root.themeSecondary; font.pixelSize: 10 }
+                            Text { text: "· v6.1.46"; color: root.themeSecondary; font.pixelSize: 10 }
                             Item { Layout.fillWidth: true }
                         }
                     }
@@ -3031,7 +3053,6 @@ font.pixelSize:13 }
                                     readonly property string macAddr: modelData.mac
                                     readonly property bool expanded: root.scanExpanded[ipKey] === true
                                     readonly property var scan: root.portScans[ipKey] || null
-                                    readonly property string pmode: scan ? scan.mode : "common"
                                     readonly property string prange: scan ? scan.range : "1-1024"
                                     readonly property string pstate: scan ? scan.state : "idle"
                                     // "Router" / "This device" and the reverse DNS name, when known
@@ -3146,53 +3167,23 @@ font.pixelSize:13 }
 
                                             Text { text: "Scan TCP ports on " + hostRow.ipKey; color: root.themeText; font.pixelSize: 10; font.bold: true }
 
-                                            // Which ports to check
+                                            // Port range to scan (default 1-1024; full range 1-65535 allowed)
                                             Row {
                                                 width: parent.width
-                                                spacing: 5
-                                                Repeater {
-                                                    model: [{k: "common", t: "Common"}, {k: "wellknown", t: "1\u20131024"}, {k: "range", t: "Range"}]
-                                                    delegate: Rectangle {
-                                                        readonly property bool sel: hostRow.pmode === modelData.k
-                                                        width: (parent.width - 10) / 3
-                                                        height: 26
-                                                        radius: 5
-                                                        color: sel ? root.alpha(root.themeHighlight, .18) : root.alpha(root.themeBackground, .80)
-                                                        border.width: 1
-                                                        border.color: sel ? root.themeHighlight : root.alpha(root.themeText, .12)
-                                                        Text {
-                                                            anchors.centerIn: parent
-                                                            text: modelData.t
-                                                            color: root.themeText
-                                                            font.pixelSize: 10
-                                                            font.bold: parent.sel
-                                                        }
-                                                        MouseArea {
-                                                            anchors.fill: parent
-                                                            cursorShape: Qt.PointingHandCursor
-                                                            onClicked: root.setPortMode(hostRow.ipKey, modelData.k)
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                            // Custom range input
-                                            Row {
-                                                width: parent.width
-                                                spacing: 5
-                                                visible: hostRow.pmode === "range"
+                                                spacing: 6
                                                 Controls.TextField {
                                                     id: rangeField
-                                                    width: parent.width - 66
+                                                    width: parent.width - 78
                                                     text: hostRow.prange
-                                                    placeholderText: "from-to, e.g. 8000-9000"
-                                                    font.pixelSize: 10
+                                                    placeholderText: "from-to, e.g. 1-65535"
+                                                    font.pixelSize: 11
                                                     selectByMouse: true
                                                     onEditingFinished: root.setPortRange(hostRow.ipKey, text.trim())
                                                     onAccepted: { root.setPortRange(hostRow.ipKey, text.trim()); root.runPortScan(hostRow.ipKey) }
                                                 }
                                                 Text {
                                                     anchors.verticalCenter: parent.verticalCenter
-                                                    text: "max 2048"
+                                                    text: "1\u201365535"
                                                     color: root.themeSecondary
                                                     font.pixelSize: 9
                                                 }
@@ -3213,16 +3204,41 @@ font.pixelSize:13 }
                                                     width: parent.width - 116
                                                     elide: Text.ElideRight
                                                     text: hostRow.pstate === "error" ? hostRow.scan.error
-                                                        : hostRow.pstate === "running" ? "Checking ports\u2026"
-                                                        : hostRow.pstate === "done" ? (hostRow.scan.ports.length > 0
+                                                        : hostRow.pstate === "running" ? "Checking " + root.rangeCount(hostRow.prange) + " ports\u2026"
+                                                        : hostRow.pstate === "done" ? ((hostRow.scan.ports.length > 0
                                                             ? hostRow.scan.ports.length + " open \u00b7 " + hostRow.scan.scanned + " checked"
                                                             : "No open ports \u00b7 " + hostRow.scan.scanned + " checked")
+                                                            + (hostRow.scan.secs > 0 ? " \u00b7 " + hostRow.scan.secs.toFixed(1) + " s" : ""))
                                                         : "Plain TCP connect, no root needed"
                                                     color: hostRow.pstate === "error" ? root.themeNegative
                                                         : hostRow.pstate === "running" ? root.themeHighlight
                                                         : (hostRow.pstate === "done" && hostRow.scan.ports.length > 0) ? root.themePositive
                                                         : root.themeSecondary
                                                     font.pixelSize: 10
+                                                }
+                                            }
+                                            // Indeterminate progress while a (possibly large) scan runs
+                                            Rectangle {
+                                                id: psBar
+                                                visible: hostRow.pstate === "running"
+                                                width: parent.width
+                                                height: 3
+                                                radius: 1.5
+                                                color: root.alpha(root.themeText, .08)
+                                                clip: true
+                                                Rectangle {
+                                                    id: psFill
+                                                    width: psBar.width * 0.3
+                                                    height: psBar.height
+                                                    radius: 1.5
+                                                    color: root.themeHighlight
+                                                    NumberAnimation on x {
+                                                        from: -psFill.width
+                                                        to: psBar.width
+                                                        duration: 1200
+                                                        loops: Animation.Infinite
+                                                        running: hostRow.pstate === "running"
+                                                    }
                                                 }
                                             }
                                             // Open ports

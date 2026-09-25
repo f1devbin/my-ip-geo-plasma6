@@ -1,12 +1,17 @@
 # My IP & Geo
 
-Version 6.1.45
+Version 6.1.46
 
 Compact KDE Plasma 6 widget for public IP/geolocation, local network information and network tools.
 
 ## Requirements
 - KDE Plasma 6 (tested on Kubuntu 26.04). Nothing to install and no root rights: the widget uses `curl`, `ip`, `ping`, `ss` and standard shell tools, all present on Kubuntu by default.
 - Used when present, never required: `iw` or NetworkManager (Wi-Fi details), `resolvectl` (DNS servers), `notify-send` (notifications, D-Bus is used otherwise), KDE System Monitor's `ksgrd_network_helper` (per-application traffic).
+
+## v6.1.46
+- Port scanner: one range field instead of the Common / 1–1024 / Range buttons. Default 1-1024, any range up to 1-65535; the 2048-port limit is gone.
+- New scan engine: non-blocking TCP connects, up to 1000 at a time, in one Perl process (Perl comes from perl-base, an Essential package that is always installed on Debian/Ubuntu, so still no root and no extra packages). The full range 1-65535 takes about 1 s against a device that refuses closed ports and about 20 s against one whose firewall silently drops them. Before, every port started its own processes, which is why large ranges were slow and were capped.
+- While scanning: "Checking 65535 ports…" with a progress bar. The result shows the scan time ("7 open · 65535 checked · 1.1 s"). A scan that does not finish is reported as such instead of leaving the Scan buttons disabled.
 
 ## v6.1.45
 - Port scanner in the Network Scanner. Click a device in the scan results to open it, then scan its open TCP ports: "Common" (about 55 well-known service ports, a couple of seconds), "1–1024" (all well-known ports) or a custom range (e.g. 8000-9000, capped at 2048 ports). Open ports are shown as chips with the service name (22 ssh, 443 https, 8080 http-alt …), with a "N open · M checked" summary.

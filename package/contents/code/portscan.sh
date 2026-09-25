@@ -1,69 +1,115 @@
 #!/bin/bash
 # My IP & Geo - TCP port check for one host on the local network (Scanner -> Ports).
-# Plain unprivileged TCP connect through bash's /dev/tcp: no root, nmap, netcat or extra
-# packages. It only reports whether a port accepts a connection; it sends no data.
+# Non-blocking TCP connects, up to 1000 at a time, in one Perl process. Perl comes from perl-base,
+# an Essential package that is always installed on Debian/Ubuntu, so no root, nmap, netcat or
+# extra packages are needed; the full range 1-65535 takes seconds on a LAN.
+# It only checks whether a port accepts a TCP connection and sends no data.
 #
-#   portscan.sh <host> <spec> [runid]
-#     spec: common | 1-1024 | <from>-<to>
+#   portscan.sh <host> <from>-<to> [runid]
 #
 # Output:
-#   SCAN <host> <ports_scanned>
+#   SCAN <host> <ports>
 #   OPEN <port> <service>          one line per open port, lowest first
 #   DONE <open_count>
-#   ERROR <message>                on bad input
+#   TIME <seconds>
+#   ERROR <message>                on bad input or when the scan could not finish
 # runid only makes the command string unique so the executable engine re-runs it.
 
 host=$1
 spec=$2
 
-# Only a bare IPv4/IPv6 literal is ever accepted, so the value can carry nothing but an address.
+# Only a bare IPv4/IPv6 literal is accepted, so the value can carry nothing but an address
 case "$host" in
     ''|*[!0-9.:a-fA-F]*) echo "ERROR invalid host"; exit 0 ;;
 esac
 
-CONNECT_TIMEOUT=0.35    # seconds to wait for one port
-MAX_PORTS=2048         # hard cap, so the widget can never hang on a huge range
-CONCURRENCY=200        # parallel connects
+# "from-to", each end clamped to 1..65535, low end first
+from=${spec%%-*}; to=${spec##*-}
+case "$from" in ''|*[!0-9]*) echo "ERROR bad range"; exit 0 ;; esac
+case "$to" in ''|*[!0-9]*) echo "ERROR bad range"; exit 0 ;; esac
+clamp() {
+    local v=$1
+    [ ${#v} -gt 5 ] && v=65535
+    v=$((10#$v))
+    [ "$v" -lt 1 ] && v=1
+    [ "$v" -gt 65535 ] && v=65535
+    echo "$v"
+}
+from=$(clamp "$from"); to=$(clamp "$to")
+if [ "$from" -gt "$to" ]; then tmp=$from; from=$to; to=$tmp; fi
 
-# Well-known service ports, checked in "common" mode
-COMMON="20 21 22 23 25 53 67 80 110 111 123 135 139 143 161 389 443 445 465 514 515 587 \
-631 993 995 1080 1194 1433 1521 1723 1883 2049 2222 3000 3306 3389 5000 5060 5432 5900 \
-5985 6379 8000 8006 8080 8081 8443 8888 9000 9090 9100 9200 10000 11211 27017"
+if ! command -v perl >/dev/null 2>&1; then echo "ERROR perl not found"; exit 0; fi
 
-ports=""
-case "$spec" in
-    common)
-        ports=$COMMON ;;
-    *-*)
-        from=${spec%%-*}; to=${spec##*-}
-        case "$from" in ''|*[!0-9]*) echo "ERROR bad range"; exit 0 ;; esac
-        case "$to" in ''|*[!0-9]*) echo "ERROR bad range"; exit 0 ;; esac
-        [ "$from" -lt 1 ] && from=1
-        [ "$to" -gt 65535 ] && to=65535
-        if [ "$from" -gt "$to" ]; then tmp=$from; from=$to; to=$tmp; fi
-        [ $((to - from + 1)) -gt "$MAX_PORTS" ] && to=$((from + MAX_PORTS - 1))
-        ports=$(seq "$from" "$to") ;;
-    *)
-        echo "ERROR bad spec"; exit 0 ;;
+echo "SCAN $host $((to - from + 1))"
+# Microseconds; the decimal separator of $EPOCHREALTIME follows the locale ("." or ",")
+t0=${EPOCHREALTIME//[.,]/}
+
+# Resolve the neighbour (ARP) first: while it is unknown the kernel queues only a few hundred
+# packets, so the first burst of connects could be lost
+ping -c 1 -W 1 "$host" >/dev/null 2>&1
+
+out=$(timeout 170 perl - "$host" "$from" "$to" 1000 0.3 <<'PERL'
+use strict;
+use warnings;
+use Socket qw(AF_INET AF_INET6 SOCK_STREAM inet_pton pack_sockaddr_in pack_sockaddr_in6);
+use Fcntl qw(F_GETFL F_SETFL O_NONBLOCK);
+
+my ($host, $from, $to, $inflight, $wait) = @ARGV;
+my ($family, $addr);
+if (defined($addr = inet_pton(AF_INET, $host)))     { $family = AF_INET }
+elsif (defined($addr = inet_pton(AF_INET6, $host))) { $family = AF_INET6 }
+else { print "ERROR invalid host\n"; exit 0 }
+
+my @open;
+my $port = $from;
+while ($port <= $to) {
+    # Start up to $inflight connects without waiting for them
+    my %pending;                                        # fileno => [handle, port]
+    while ($port <= $to && keys(%pending) < $inflight) {
+        socket(my $fh, $family, SOCK_STREAM, 0) or last;   # out of descriptors: finish these first
+        fcntl($fh, F_SETFL, fcntl($fh, F_GETFL, 0) | O_NONBLOCK);
+        my $sa = $family == AF_INET ? pack_sockaddr_in($port, $addr) : pack_sockaddr_in6($port, $addr);
+        if (connect($fh, $sa)) { push @open, $port; close $fh }
+        else { $pending{fileno $fh} = [$fh, $port] }
+        $port++;
+    }
+    if (!%pending && $port <= $to) { print "ERROR no free sockets\n"; exit 0 }
+
+    # A socket becomes writable when its connect has finished: connected (open) or refused (closed).
+    # Ports without any answer within $wait seconds are filtered.
+    my $left = $wait;
+    while (%pending && $left > 0) {
+        my $want = '';
+        vec($want, $_, 1) = 1 for keys %pending;
+        my $ready = $want;
+        my ($n, $timeleft) = select(undef, $ready, undef, $left);
+        last if !defined $n || $n <= 0;
+        $left = $timeleft;
+        for my $fd (keys %pending) {
+            next unless vec($ready, $fd, 1);
+            my ($fh, $p) = @{ delete $pending{$fd} };
+            push @open, $p if defined getpeername($fh);    # only a connected socket has a peer
+            close $fh;
+        }
+    }
+    close $_->[0] for values %pending;
+}
+
+for my $p (sort { $a <=> $b } @open) {
+    my $svc = getservbyport($p, 'tcp');
+    print "OPEN $p ", (defined $svc ? $svc : ''), "\n";
+}
+print "DONE ", scalar(@open), "\n";
+PERL
+)
+rc=$?
+
+case "$out" in
+    *DONE*) printf '%s\n' "$out" ;;
+    *ERROR*) printf '%s\n' "$out" | grep -m1 '^ERROR'; exit 0 ;;
+    *) [ "$rc" -eq 124 ] && echo "ERROR scan took too long" || echo "ERROR scan failed"; exit 0 ;;
 esac
 
-count=$(printf '%s\n' $ports | grep -c .)
-echo "SCAN $host $count"
-
-# One TCP connect attempt; prints the port number if the connection is accepted.
-probe() {
-    if timeout "$CONNECT_TIMEOUT" bash -c "exec 3<>/dev/tcp/$MYIPGEO_HOST/$1" 2>/dev/null; then
-        echo "$1"
-    fi
-}
-export -f probe
-export MYIPGEO_HOST="$host" CONNECT_TIMEOUT
-
-# Scan in parallel, then report the open ports in numeric order with their service name.
-open_count=0
-for p in $(printf '%s\n' $ports | xargs -P "$CONCURRENCY" -I{} bash -c 'probe "$@"' _ {} | sort -n); do
-    svc=$(getent services "$p/tcp" 2>/dev/null | awk '{print $1; exit}')
-    echo "OPEN $p ${svc:-}"
-    open_count=$((open_count + 1))
-done
-echo "DONE $open_count"
+t1=${EPOCHREALTIME//[.,]/}
+ms=$(( (10#$t1 - 10#$t0) / 1000 ))
+printf 'TIME %d.%d\n' $((ms / 1000)) $((ms % 1000 / 100))
