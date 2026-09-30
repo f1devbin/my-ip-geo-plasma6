@@ -1,0 +1,12 @@
+PING 0.000186 0.023639 200 8f1d2c3b4a5e6f70-FRA|cfRequestDuration;dur=0.69
+PING 0.000086 0.023629 200 8f1d2c3b4a5e6f70-FRA|cfRequestDuration;dur=0.43
+PING 0.000078 0.023847 200 8f1d2c3b4a5e6f70-FRA|cfRequestDuration;dur=0.57
+PING 0.000073 0.020895 200 8f1d2c3b4a5e6f70-FRA|cfRequestDuration;dur=0.44
+PING 0.000065 0.023922 200 8f1d2c3b4a5e6f70-FRA|cfRequestDuration;dur=0.80
+PING 0.000074 0.022408 200 8f1d2c3b4a5e6f70-FRA|cfRequestDuration;dur=0.68
+PING 0.000062 0.021374 200 8f1d2c3b4a5e6f70-FRA|cfRequestDuration;dur=0.32
+PING 0.000062 0.023607 200 8f1d2c3b4a5e6f70-FRA|cfRequestDuration;dur=0.63
+PING 0.000086 0.022956 200 8f1d2c3b4a5e6f70-FRA|cfRequestDuration;dur=0.57
+PING 0.000076 0.023874 200 8f1d2c3b4a5e6f70-FRA|cfRequestDuration;dur=0.64
+PING 0.000081 0.021774 200 8f1d2c3b4a5e6f70-FRA|cfRequestDuration;dur=0.80
+PING 0.000090 0.022834 200 8f1d2c3b4a5e6f70-FRA|cfRequestDuration;dur=0.63

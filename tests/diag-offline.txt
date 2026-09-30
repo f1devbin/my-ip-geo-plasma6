@@ -1,0 +1,50 @@
+===== status
+OFFLINE
+===== end status 26ms
+===== link
+===== end link 40ms
+===== gateway
+NOGW
+===== end gateway 20ms
+===== dns
+LOOKUP rc=0 ms=1 addr=104.16.124.96
+NXLOOKUP rc=2 ms=1 addr=
+DOH fail
+===== end dns 143ms
+===== internet
+__PING__ 1.1.1.1
+ping: connect: Network is unreachable
+__PING__ 8.8.8.8
+ping: connect: Network is unreachable
+TCP 0.000000 000
+===== end internet 34ms
+===== web
+WEBRC 7
+WEB 000 0.000528 0.000000 0.000000 0.000000 0.000559 
+PORTAL 000 
+WEBERR curl: (7) Failed to connect to www.cloudflare.com port 443 after 0 ms: Could not connect to server
+===== end web 40ms
+===== ipv6
+===== end ipv6 24ms
+===== mtu
+__PMTU__
+ping: connect: Network is unreachable
+__SIZES__
+===== end mtu 39ms
+===== route
+HOP 1 * - 0
+HOP 2 * - 0
+HOP 3 * - 0
+HOP 4 * - 0
+HOP 5 * - 0
+HOP 6 * - 0
+HOP 7 * - 0
+HOP 8 * - 0
+HOP 9 * - 0
+HOP 10 * - 0
+HOP 11 * - 0
+HOP 12 * - 0
+HOP 13 * - 0
+HOP 14 * - 0
+HOP 15 * - 0
+===== end route 119ms

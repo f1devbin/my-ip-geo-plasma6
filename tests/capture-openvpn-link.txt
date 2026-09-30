@@ -1,0 +1,27 @@
+ROUTE4 default via 192.168.1.1 dev wlp2s0 proto dhcp src 192.168.1.12 metric 600 
+ROUTE6 default via fe80::1 dev wlp2s0 proto ra metric 600 pref medium 
+EGRESS 1.1.1.1 via 10.42.0.1 dev tun0 src 10.42.0.53 uid 1000 
+IFACE wlp2s0 kind=wifi devtype=wlan operstate=up mtu=1500 speed= duplex= mac=02:11:22:33:44:55 
+ADDR wlp2s0 inet 192.168.1.12/24
+ADDR wlp2s0 inet6 fe80::1234:5678:9abc:def0/64
+IW wlp2s0 Connected to 02:aa:bb:cc:dd:ee (on wlp2s0) 
+IW wlp2s0       SSID: HomeWiFi 
+IW wlp2s0       freq: 2462.0 
+IW wlp2s0       RX: 369020330 bytes (330933 packets) 
+IW wlp2s0       TX: 166749288 bytes (276020 packets) 
+IW wlp2s0       signal: -50 dBm 
+IW wlp2s0       rx bitrate: 52.0 MBit/s MCS 5 
+IW wlp2s0       tx bitrate: 78.0 MBit/s MCS 12 
+IW wlp2s0       bss flags: short-slot-time 
+IW wlp2s0       dtim period: 1 
+IW wlp2s0       beacon int: 100 
+NMWIFI wlp2s0 *:HomeWiFi:11:2462 MHz:130 Mbit/s:71 
+PROCWL wlp2s0: 0000   60.  -50.  -256        0      0      0    250   7995        0 
+IFACE tun0 kind=vpn devtype=ovpn operstate=up mtu=1500 speed= duplex= mac= 
+ADDR tun0 inet 10.42.0.53/21
+ADDR tun0 inet6 fd15:53b6:dead::2/64
+VPN tun0 vpn openvpn 
+NMCONN full 
+NMACTIVE wlp2s0:HomeWiFi 
+NMACTIVE docker0:docker0 
+NMACTIVE lo:lo 

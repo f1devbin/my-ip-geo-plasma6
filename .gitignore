@@ -1,0 +1,12 @@
+# build output (./build.sh)
+/dist/
+*.zip
+*.plasmoid
+
+# Qt / editors
+*.qmlc
+*.jsc
+.directory
+*~
+.idea/
+.vscode/

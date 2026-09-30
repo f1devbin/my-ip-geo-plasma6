@@ -81,6 +81,23 @@ PlasmoidItem {
         return luminance(bg) < 0.5 ? Qt.rgba(1, 1, 1, 1) : Qt.rgba(0.08, 0.08, 0.08, 1)
     }
 
+    // Status colours (green = up/ok, red = down/error) must keep their hue. Breeze Dark's red has too
+    // little contrast for contrastText, which then turned it white: offline devices and errors lost
+    // their red. Here the colour is lightened (dark background) or darkened (light background) in
+    // steps until it is readable, so red stays red.
+    function statusColor(bg, preferred) {
+        var lb = luminance(bg)
+        if (Math.abs(lb - luminance(preferred)) >= 0.34) return preferred
+        var to = lb < 0.5 ? 1 : 0
+        for (var i = 1; i < 10; ++i) {
+            var t = i / 10
+            var c = Qt.rgba(preferred.r + (to - preferred.r) * t, preferred.g + (to - preferred.g) * t,
+                            preferred.b + (to - preferred.b) * t, 1)
+            if (Math.abs(lb - luminance(c)) >= 0.34) return c
+        }
+        return contrastText(bg, preferred)
+    }
+
     function alpha(c, a) { return Qt.rgba(c.r, c.g, c.b, a) }
 
     property color themeBackground: themeBackgroundRaw
@@ -89,8 +106,8 @@ PlasmoidItem {
     // Secondary text is mostly the text colour: the theme's "disabled" grey is hard to read on a dark background
     function mix(a, b, t) { return Qt.rgba(a.r + (b.r - a.r) * t, a.g + (b.g - a.g) * t, a.b + (b.b - a.b) * t, 1) }
     property color themeSecondary: contrastText(themeBackgroundRaw, mix(themeTextRaw, themeSecondaryRaw, 0.25))
-    property color themePositive: contrastText(themeBackgroundRaw, themePositiveRaw)
-    property color themeNegative: contrastText(themeBackgroundRaw, themeNegativeRaw)
+    property color themePositive: statusColor(themeBackgroundRaw, themePositiveRaw)
+    property color themeNegative: statusColor(themeBackgroundRaw, themeNegativeRaw)
     property color themeSurface: root.themeBackground
 
     property string publicIp: "—"
@@ -2696,7 +2713,7 @@ font.pixelSize:13 }
                             spacing: 5
                             Image { source: Qt.resolvedUrl("../images/github.svg"); sourceSize.width: 18; sourceSize.height: 18; Layout.preferredWidth: 18; Layout.preferredHeight: 18 }
                             Text { text: "GitHub"; color: root.themeLink; font.pixelSize: 13; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: Qt.openUrlExternally("https://github.com/f1devbin") } }
-                            Text { text: "· v6.1.46"; color: root.themeSecondary; font.pixelSize: 10 }
+                            Text { text: "· v6.1.47"; color: root.themeSecondary; font.pixelSize: 10 }
                             Item { Layout.fillWidth: true }
                         }
                     }

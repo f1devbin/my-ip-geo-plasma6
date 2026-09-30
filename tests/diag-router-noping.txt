@@ -1,0 +1,105 @@
+===== status
+ONLINE 0.065776
+===== end status 140ms
+===== link
+ROUTE4 default via 10.77.1.1 dev enp3s0 proto dhcp src 10.77.1.2 metric 100 
+EGRESS 1.1.1.1 via 10.77.1.1 dev enp3s0 src 10.77.1.2 uid 1000 
+IFACE enp3s0 kind=ethernet devtype=- operstate=up mtu=1500 speed=10000 duplex=full mac=42:f2:e0:b2:49:4b
+ADDR enp3s0 inet 10.77.1.2/24
+===== end link 74ms
+===== gateway
+GW 10.77.1.1 enp3s0
+__PING__ 10.77.1.1
+PING 10.77.1.1 (10.77.1.1) 56(84) bytes of data.
+
+--- 10.77.1.1 ping statistics ---
+5 packets transmitted, 0 received, 100% packet loss, time 813ms
+
+__NEIGH__
+10.77.1.1 dev enp3s0 lladdr a2:db:35:59:e9:40 REACHABLE 
+===== end gateway 1838ms
+===== dns
+SERVERS Link 0 (enp3s0): 10.77.1.1 
+LOOKUP rc=0 ms=5 addr=104.16.124.96
+NXLOOKUP rc=2 ms=2 addr=
+DOH ok
+===== end dns 144ms
+===== internet
+__PING__ 1.1.1.1
+PING 1.1.1.1 (1.1.1.1) 56(84) bytes of data.
+64 bytes from 1.1.1.1: icmp_seq=1 ttl=62 time=0.028 ms
+64 bytes from 1.1.1.1: icmp_seq=2 ttl=62 time=0.054 ms
+64 bytes from 1.1.1.1: icmp_seq=3 ttl=62 time=0.053 ms
+64 bytes from 1.1.1.1: icmp_seq=4 ttl=62 time=0.038 ms
+64 bytes from 1.1.1.1: icmp_seq=5 ttl=62 time=0.037 ms
+64 bytes from 1.1.1.1: icmp_seq=6 ttl=62 time=0.037 ms
+64 bytes from 1.1.1.1: icmp_seq=7 ttl=62 time=0.049 ms
+64 bytes from 1.1.1.1: icmp_seq=8 ttl=62 time=0.055 ms
+64 bytes from 1.1.1.1: icmp_seq=9 ttl=62 time=0.050 ms
+64 bytes from 1.1.1.1: icmp_seq=10 ttl=62 time=0.063 ms
+
+--- 1.1.1.1 ping statistics ---
+10 packets transmitted, 10 received, 0% packet loss, time 1833ms
+rtt min/avg/max/mdev = 0.028/0.046/0.063/0.010 ms
+__PING__ 8.8.8.8
+PING 8.8.8.8 (8.8.8.8) 56(84) bytes of data.
+64 bytes from 8.8.8.8: icmp_seq=1 ttl=62 time=0.046 ms
+64 bytes from 8.8.8.8: icmp_seq=2 ttl=62 time=0.038 ms
+64 bytes from 8.8.8.8: icmp_seq=3 ttl=62 time=0.051 ms
+64 bytes from 8.8.8.8: icmp_seq=4 ttl=62 time=0.051 ms
+64 bytes from 8.8.8.8: icmp_seq=5 ttl=62 time=0.053 ms
+64 bytes from 8.8.8.8: icmp_seq=6 ttl=62 time=0.051 ms
+64 bytes from 8.8.8.8: icmp_seq=7 ttl=62 time=0.037 ms
+64 bytes from 8.8.8.8: icmp_seq=8 ttl=62 time=0.034 ms
+64 bytes from 8.8.8.8: icmp_seq=9 ttl=62 time=0.040 ms
+64 bytes from 8.8.8.8: icmp_seq=10 ttl=62 time=0.037 ms
+
+--- 8.8.8.8 ping statistics ---
+10 packets transmitted, 10 received, 0% packet loss, time 1840ms
+rtt min/avg/max/mdev = 0.034/0.043/0.053/0.007 ms
+===== end internet 1870ms
+===== web
+WEBRC 0
+WEB 200 0.000485 0.000563 0.017108 0.065312 0.065460 104.16.124.96
+PORTAL 204 
+TRACE ip=10.77.1.2
+TRACE colo=WAW
+TRACE http=http/1.1
+TRACE loc=BY
+TRACE tls=TLSv1.3
+TRACE warp=off
+===== end web 109ms
+===== ipv6
+===== end ipv6 25ms
+===== mtu
+DEVMTU enp3s0 1500
+__PMTU__
+PING 1.1.1.1 (1.1.1.1) 1472(1500) bytes of data.
+1480 bytes from 1.1.1.1: icmp_seq=1 ttl=62 time=0.036 ms
+1480 bytes from 1.1.1.1: icmp_seq=2 ttl=62 time=0.050 ms
+
+--- 1.1.1.1 ping statistics ---
+2 packets transmitted, 2 received, 0% packet loss, time 203ms
+__SIZES__
+OK 1472
+OK 1412
+OK 1372
+OK 1292
+OK 1332
+OK 1272
+OK 1312
+OK 1432
+OK 1392
+OK 1352
+OK 1452
+OK 1252
+===== end mtu 248ms
+===== route
+HOP 1 10.77.1.1 - 0
+HOP 2 100.64.0.1 - 0
+HOP 3 1.1.1.1 0.015 1
+NAME 10.77.1.1 router.lan
+NAME 1.1.1.1 one.one.one.one
+NAME 100.64.0.1 gw.isp.example.net
+RTT 100.64.0.1 0.012
+===== end route 1474ms

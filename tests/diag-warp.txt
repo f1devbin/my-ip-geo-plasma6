@@ -1,0 +1,112 @@
+===== status
+VPN 0.060221
+===== end status 128ms
+===== link
+ROUTE4 default via 10.77.1.1 dev enp3s0 proto dhcp src 10.77.1.2 metric 100 
+EGRESS 1.1.1.1 via 10.77.1.1 dev enp3s0 src 10.77.1.2 uid 1000 
+IFACE enp3s0 kind=ethernet devtype=- operstate=up mtu=1500 speed=10000 duplex=full mac=42:f2:e0:b2:49:4b
+ADDR enp3s0 inet 10.77.1.2/24
+VPN CloudflareWARP tun
+===== end link 76ms
+===== gateway
+GW 10.77.1.1 enp3s0
+__PING__ 10.77.1.1
+PING 10.77.1.1 (10.77.1.1) 56(84) bytes of data.
+64 bytes from 10.77.1.1: icmp_seq=1 ttl=64 time=0.033 ms
+64 bytes from 10.77.1.1: icmp_seq=2 ttl=64 time=0.035 ms
+64 bytes from 10.77.1.1: icmp_seq=3 ttl=64 time=0.050 ms
+64 bytes from 10.77.1.1: icmp_seq=4 ttl=64 time=0.040 ms
+64 bytes from 10.77.1.1: icmp_seq=5 ttl=64 time=0.043 ms
+
+--- 10.77.1.1 ping statistics ---
+5 packets transmitted, 5 received, 0% packet loss, time 816ms
+rtt min/avg/max/mdev = 0.033/0.040/0.050/0.006 ms
+__NEIGH__
+10.77.1.1 dev enp3s0 lladdr a2:db:35:59:e9:40 REACHABLE 
+===== end gateway 848ms
+===== dns
+SERVERS Link 0 (enp3s0): 10.77.1.1 
+LOOKUP rc=0 ms=2 addr=104.16.124.96
+NXLOOKUP rc=2 ms=2 addr=
+DOH ok
+===== end dns 148ms
+===== internet
+__PING__ 1.1.1.1
+PING 1.1.1.1 (1.1.1.1) 56(84) bytes of data.
+64 bytes from 1.1.1.1: icmp_seq=1 ttl=62 time=0.040 ms
+64 bytes from 1.1.1.1: icmp_seq=2 ttl=62 time=0.050 ms
+64 bytes from 1.1.1.1: icmp_seq=3 ttl=62 time=0.046 ms
+64 bytes from 1.1.1.1: icmp_seq=4 ttl=62 time=0.048 ms
+64 bytes from 1.1.1.1: icmp_seq=5 ttl=62 time=0.056 ms
+64 bytes from 1.1.1.1: icmp_seq=6 ttl=62 time=0.040 ms
+64 bytes from 1.1.1.1: icmp_seq=7 ttl=62 time=0.054 ms
+64 bytes from 1.1.1.1: icmp_seq=8 ttl=62 time=0.049 ms
+64 bytes from 1.1.1.1: icmp_seq=9 ttl=62 time=0.050 ms
+64 bytes from 1.1.1.1: icmp_seq=10 ttl=62 time=0.040 ms
+
+--- 1.1.1.1 ping statistics ---
+10 packets transmitted, 10 received, 0% packet loss, time 1836ms
+rtt min/avg/max/mdev = 0.040/0.047/0.056/0.005 ms
+__PING__ 8.8.8.8
+PING 8.8.8.8 (8.8.8.8) 56(84) bytes of data.
+64 bytes from 8.8.8.8: icmp_seq=1 ttl=62 time=0.026 ms
+64 bytes from 8.8.8.8: icmp_seq=2 ttl=62 time=0.044 ms
+64 bytes from 8.8.8.8: icmp_seq=3 ttl=62 time=0.051 ms
+64 bytes from 8.8.8.8: icmp_seq=4 ttl=62 time=0.053 ms
+64 bytes from 8.8.8.8: icmp_seq=5 ttl=62 time=0.036 ms
+64 bytes from 8.8.8.8: icmp_seq=6 ttl=62 time=0.053 ms
+64 bytes from 8.8.8.8: icmp_seq=7 ttl=62 time=0.037 ms
+64 bytes from 8.8.8.8: icmp_seq=8 ttl=62 time=0.045 ms
+64 bytes from 8.8.8.8: icmp_seq=9 ttl=62 time=0.050 ms
+64 bytes from 8.8.8.8: icmp_seq=10 ttl=62 time=0.063 ms
+
+--- 8.8.8.8 ping statistics ---
+10 packets transmitted, 10 received, 0% packet loss, time 1836ms
+rtt min/avg/max/mdev = 0.026/0.045/0.063/0.010 ms
+===== end internet 1866ms
+===== web
+WEBRC 0
+WEB 200 0.000572 0.000842 0.017549 0.061048 0.061158 104.16.124.96
+PORTAL 204 
+TRACE ip=10.77.1.2
+TRACE colo=WAW
+TRACE http=http/1.1
+TRACE loc=BY
+TRACE tls=TLSv1.3
+TRACE warp=on
+===== end web 103ms
+===== ipv6
+===== end ipv6 24ms
+===== mtu
+DEVMTU enp3s0 1500
+__PMTU__
+PING 1.1.1.1 (1.1.1.1) 1472(1500) bytes of data.
+1480 bytes from 1.1.1.1: icmp_seq=1 ttl=62 time=0.036 ms
+1480 bytes from 1.1.1.1: icmp_seq=2 ttl=62 time=0.060 ms
+
+--- 1.1.1.1 ping statistics ---
+2 packets transmitted, 2 received, 0% packet loss, time 203ms
+__SIZES__
+OK 1472
+OK 1312
+OK 1292
+OK 1432
+OK 1412
+OK 1252
+OK 1332
+OK 1352
+OK 1392
+OK 1452
+OK 1372
+OK 1272
+===== end mtu 247ms
+===== route
+HOP 1 10.77.1.1 - 0
+HOP 2 100.64.0.1 - 0
+HOP 3 1.1.1.1 0.023 1
+NAME 1.1.1.1 one.one.one.one
+NAME 10.77.1.1 router.lan
+NAME 100.64.0.1 gw.isp.example.net
+RTT 100.64.0.1 0.03
+RTT 10.77.1.1 0.019
+===== end route 483ms
