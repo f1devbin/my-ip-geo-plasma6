@@ -2,6 +2,11 @@
 
 All changes of My IP & Geo, newest first.
 
+## v6.1.48
+- Scanner: every device has a magnifier button (column "Ports", next to the Monitor button) that opens and closes its port scan; while the scan panel of a device is open, its button has an accent frame. Before, the panel opened only by clicking the row, which was easy to miss. Both buttons show a tooltip ("Scan ports", "Watch in Monitor" / "Stop watching").
+- Port scan: the whole range 1-65535 is the default. The range field is shorter and sits in one row with the Scan ports button; the result line is below them.
+- Diagnostics and Apps: values at the right edge ("Ethernet 1 Gbit/s", "14 ms", totals) no longer run under the scroll bar. The space kept for it was a fixed 10 px, Breeze's scroll bar is wider; now the bar's own width is kept free.
+
 ## v6.1.47
 - Red is red again on dark themes. The rule that keeps text readable replaced a colour with plain white when it had too little contrast, and Breeze Dark's red falls just under that limit, so offline devices in Monitor and all error messages (public IP, Speed, port scan, missing tools) were white instead of red: an offline device looked the same as one not checked yet. Status colours (green, red) are now lightened step by step until readable and keep their hue; Breeze Dark's red becomes #e16975. Text colours are unchanged.
 

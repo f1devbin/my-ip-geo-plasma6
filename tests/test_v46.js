@@ -5,12 +5,12 @@ const root = load(process.argv[2], ['parsePortScan', 'sanitizeRange', 'rangeCoun
 let passed = 0;
 function t(name, fn) { fn(); passed++; console.log('ok  -', name); }
 
-t('default entry: range 1-1024, no mode', () => {
+t('default entry: the whole range 1-65535 (since 6.1.48), no mode', () => {
   root.portScans = {};
   const e = root.portEntry('10.0.0.1');
-  assert.strictEqual(e.range, '1-1024');
+  assert.strictEqual(e.range, '1-65535');
   assert.strictEqual(e.mode, undefined);
-  assert.strictEqual(root.portSpec('10.0.0.1'), '1-1024');
+  assert.strictEqual(root.portSpec('10.0.0.1'), '1-65535');
 });
 
 t('the whole range is passed through, not capped', () => {

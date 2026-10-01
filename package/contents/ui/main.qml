@@ -514,7 +514,7 @@ PlasmoidItem {
     // ----- Scanner: per-host TCP port check (portscan.sh) -----
     function portEntry(ip) {
         var e = root.portScans[ip]
-        return e ? e : {range: "1-1024", state: "idle", scanned: 0, ports: [], error: "", secs: 0}
+        return e ? e : {range: "1-65535", state: "idle", scanned: 0, ports: [], error: "", secs: 0}
     }
     function setPortScan(ip, patch) {
         var e = root.portEntry(ip)
@@ -2713,7 +2713,7 @@ font.pixelSize:13 }
                             spacing: 5
                             Image { source: Qt.resolvedUrl("../images/github.svg"); sourceSize.width: 18; sourceSize.height: 18; Layout.preferredWidth: 18; Layout.preferredHeight: 18 }
                             Text { text: "GitHub"; color: root.themeLink; font.pixelSize: 13; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: Qt.openUrlExternally("https://github.com/f1devbin") } }
-                            Text { text: "· v6.1.47"; color: root.themeSecondary; font.pixelSize: 10 }
+                            Text { text: "· v6.1.48"; color: root.themeSecondary; font.pixelSize: 10 }
                             Item { Layout.fillWidth: true }
                         }
                     }
@@ -2944,7 +2944,7 @@ font.pixelSize:13 }
                         Text { text: root.scanLoading ? "Scanning…" : root.scanStatus; color: root.scanLoading ? root.themeHighlight : root.themeSecondary; font.pixelSize: 9 }
                     }
                     Text {
-                        text: "Finds every device on the network, including ones that ignore ping (they still answer ARP). A scan takes about 10 seconds. Click a device to scan its open ports."
+                        text: "Finds every device on the network, including ones that ignore ping (they still answer ARP). A scan takes about 10 seconds. Press the magnifier next to a device to scan its open ports."
                         color: root.themeSecondary
                         font.pixelSize: 10
                         Layout.fillWidth: true
@@ -3044,6 +3044,7 @@ font.pixelSize:13 }
                             spacing: 6
                             Text { Layout.fillWidth: true; text: "Device"; color: root.themeText; font.pixelSize: 10; font.bold: true }
                             Text { Layout.preferredWidth: 112; text: "MAC address"; color: root.themeText; font.pixelSize: 10; font.bold: true }
+                            Text { Layout.preferredWidth: 44; text: "Ports"; color: root.themeText; font.pixelSize: 10; font.bold: true; horizontalAlignment: Text.AlignHCenter }
                             Text { Layout.preferredWidth: 44; text: "Monitor"; color: root.themeText; font.pixelSize: 10; font.bold: true; horizontalAlignment: Text.AlignHCenter }
                         }
                     }
@@ -3070,7 +3071,7 @@ font.pixelSize:13 }
                                     readonly property string macAddr: modelData.mac
                                     readonly property bool expanded: root.scanExpanded[ipKey] === true
                                     readonly property var scan: root.portScans[ipKey] || null
-                                    readonly property string prange: scan ? scan.range : "1-1024"
+                                    readonly property string prange: scan ? scan.range : "1-65535"
                                     readonly property string pstate: scan ? scan.state : "idle"
                                     // "Router" / "This device" and the reverse DNS name, when known
                                     readonly property string note: {
@@ -3135,13 +3136,6 @@ font.pixelSize:13 }
                                                         elide: Text.ElideRight
                                                     }
                                                 }
-                                                Text {
-                                                    text: hostRow.expanded ? "\u2304" : "\u203a"
-                                                    color: root.themeSecondary
-                                                    font.pixelSize: 14
-                                                    Layout.preferredWidth: 12
-                                                    horizontalAlignment: Text.AlignHCenter
-                                                }
                                                 TextEdit {
                                                     Layout.preferredWidth: 112
                                                     text: modelData.mac
@@ -3152,13 +3146,45 @@ font.pixelSize:13 }
                                                     selectByKeyboard: true
                                                     cursorVisible: false
                                                 }
+                                                // Port scan: opens / closes the panel under the row
                                                 Item {
                                                     Layout.preferredWidth: 44
                                                     Layout.preferredHeight: 38
                                                     Controls.Button {
+                                                        id: portsButton
                                                         anchors.centerIn: parent
                                                         width: 30
                                                         height: 26
+                                                        icon.name: "edit-find"
+                                                        icon.width: 16
+                                                        icon.height: 16
+                                                        onClicked: root.togglePortExpand(hostRow.ipKey)
+                                                        Controls.ToolTip.visible: hovered
+                                                        Controls.ToolTip.delay: 500
+                                                        Controls.ToolTip.text: hostRow.expanded ? "Hide port scan" : "Scan ports"
+                                                    }
+                                                    // Accent frame while the panel of this device is open (Breeze shows no checked state here)
+                                                    Rectangle {
+                                                        visible: hostRow.expanded
+                                                        anchors.fill: portsButton
+                                                        anchors.margins: -2
+                                                        radius: 6
+                                                        color: "transparent"
+                                                        border.width: 2
+                                                        border.color: root.themeHighlight
+                                                    }
+                                                }
+                                                Item {
+                                                    Layout.preferredWidth: 44
+                                                    Layout.preferredHeight: 38
+                                                    Controls.Button {
+                                                        id: watchButton
+                                                        anchors.centerIn: parent
+                                                        width: 30
+                                                        height: 26
+                                                        Controls.ToolTip.visible: hovered
+                                                        Controls.ToolTip.delay: 500
+                                                        Controls.ToolTip.text: watchButton.text === "+" ? "Watch in Monitor" : "Stop watching"
                                                         text: {
                                                             var watching = false
                                                             for (var wi = 0; wi < root.watchedDevices.length; ++wi) {
@@ -3184,55 +3210,43 @@ font.pixelSize:13 }
 
                                             Text { text: "Scan TCP ports on " + hostRow.ipKey; color: root.themeText; font.pixelSize: 10; font.bold: true }
 
-                                            // Port range to scan (default 1-1024; full range 1-65535 allowed)
+                                            // Port range and Scan in one row (default: the whole range 1-65535)
                                             Row {
-                                                width: parent.width
-                                                spacing: 6
+                                                spacing: 8
                                                 Controls.TextField {
                                                     id: rangeField
-                                                    width: parent.width - 78
+                                                    width: 132
                                                     text: hostRow.prange
-                                                    placeholderText: "from-to, e.g. 1-65535"
+                                                    placeholderText: "e.g. 8000-9000"
                                                     font.pixelSize: 11
                                                     selectByMouse: true
                                                     onEditingFinished: root.setPortRange(hostRow.ipKey, text.trim())
                                                     onAccepted: { root.setPortRange(hostRow.ipKey, text.trim()); root.runPortScan(hostRow.ipKey) }
                                                 }
-                                                Text {
-                                                    anchors.verticalCenter: parent.verticalCenter
-                                                    text: "1\u201365535"
-                                                    color: root.themeSecondary
-                                                    font.pixelSize: 9
-                                                }
-                                            }
-                                            // Run + live state
-                                            Row {
-                                                width: parent.width
-                                                spacing: 8
                                                 Controls.Button {
                                                     width: 108
-                                                    height: 28
+                                                    height: rangeField.height
                                                     text: hostRow.pstate === "running" ? "Scanning\u2026" : "Scan ports"
                                                     enabled: root.portScanIp === ""
-                                                    onClicked: root.runPortScan(hostRow.ipKey)
+                                                    onClicked: { root.setPortRange(hostRow.ipKey, rangeField.text.trim()); root.runPortScan(hostRow.ipKey) }
                                                 }
-                                                Text {
-                                                    anchors.verticalCenter: parent.verticalCenter
-                                                    width: parent.width - 116
-                                                    elide: Text.ElideRight
-                                                    text: hostRow.pstate === "error" ? hostRow.scan.error
-                                                        : hostRow.pstate === "running" ? "Checking " + root.rangeCount(hostRow.prange) + " ports\u2026"
-                                                        : hostRow.pstate === "done" ? ((hostRow.scan.ports.length > 0
-                                                            ? hostRow.scan.ports.length + " open \u00b7 " + hostRow.scan.scanned + " checked"
-                                                            : "No open ports \u00b7 " + hostRow.scan.scanned + " checked")
-                                                            + (hostRow.scan.secs > 0 ? " \u00b7 " + hostRow.scan.secs.toFixed(1) + " s" : ""))
-                                                        : "Plain TCP connect, no root needed"
-                                                    color: hostRow.pstate === "error" ? root.themeNegative
-                                                        : hostRow.pstate === "running" ? root.themeHighlight
-                                                        : (hostRow.pstate === "done" && hostRow.scan.ports.length > 0) ? root.themePositive
-                                                        : root.themeSecondary
-                                                    font.pixelSize: 10
-                                                }
+                                            }
+                                            // Live state / result
+                                            Text {
+                                                width: parent.width
+                                                wrapMode: Text.Wrap
+                                                text: hostRow.pstate === "error" ? hostRow.scan.error
+                                                    : hostRow.pstate === "running" ? "Checking " + root.rangeCount(hostRow.prange) + " ports\u2026"
+                                                    : hostRow.pstate === "done" ? ((hostRow.scan.ports.length > 0
+                                                        ? hostRow.scan.ports.length + " open \u00b7 " + hostRow.scan.scanned + " checked"
+                                                        : "No open ports \u00b7 " + hostRow.scan.scanned + " checked")
+                                                        + (hostRow.scan.secs > 0 ? " \u00b7 " + hostRow.scan.secs.toFixed(1) + " s" : ""))
+                                                    : "Plain TCP connect, no root needed"
+                                                color: hostRow.pstate === "error" ? root.themeNegative
+                                                    : hostRow.pstate === "running" ? root.themeHighlight
+                                                    : (hostRow.pstate === "done" && hostRow.scan.ports.length > 0) ? root.themePositive
+                                                    : root.themeSecondary
+                                                font.pixelSize: 10
                                             }
                                             // Indeterminate progress while a (possibly large) scan runs
                                             Rectangle {
@@ -3361,12 +3375,14 @@ font.pixelSize:13 }
                         boundsBehavior: Flickable.StopAtBounds
                         // Details and route are below the steps: a visible bar shows there is more
                         Controls.ScrollBar.vertical: Controls.ScrollBar {
+                            id: diagScroll
                             policy: Controls.ScrollBar.AlwaysOn
                             visible: diagFlick.contentHeight > diagFlick.height + 1
                         }
                         Column {
                             id: diagColumn
-                            width: parent.width - 10
+                            // the style's own scroll bar width: Breeze's is wider than 10 px and covered the values
+                            width: parent.width - diagScroll.width - 4
                             spacing: 8
 
                             // The chain: connection -> router -> DNS -> internet -> websites
@@ -3811,12 +3827,13 @@ font.pixelSize:13 }
                         interactive: contentHeight > height
                         boundsBehavior: Flickable.StopAtBounds
                         Controls.ScrollBar.vertical: Controls.ScrollBar {
+                            id: appScroll
                             policy: Controls.ScrollBar.AlwaysOn
                             visible: appFlick.contentHeight > appFlick.height + 1
                         }
                         Column {
                             id: appTrafficColumn
-                            width: parent.width - (appFlick.contentHeight > appFlick.height + 1 ? 10 : 0)
+                            width: parent.width - (appFlick.contentHeight > appFlick.height + 1 ? appScroll.width + 4 : 0)
                             spacing: 4
                             Repeater {
                                 model: root.appTraffic
