@@ -2,6 +2,10 @@
 
 All changes of My IP & Geo, newest first.
 
+## v6.1.49
+- Port scan: the range field stretches with the widget width, the scan button sits at the right edge of the same row and shows a magnifier icon instead of the text "Scan ports" (tooltip "Start scan"). While a scan runs the button is disabled; the status line and the progress bar below show the progress.
+- No cat picture in the widget: the header is one line, the title "My IP & Geo" next to the indicators and buttons, so the tabs and the content start about 40 px higher. The panel view (widget in a panel) shows the IP address and the status dot without the picture. The widget icon (`contents/icon.png`, widget list and Monitor notifications) is unchanged.
+
 ## v6.1.48
 - Scanner: every device has a magnifier button (column "Ports", next to the Monitor button) that opens and closes its port scan; while the scan panel of a device is open, its button has an accent frame. Before, the panel opened only by clicking the row, which was easy to miss. Both buttons show a tooltip ("Scan ports", "Watch in Monitor" / "Stop watching").
 - Port scan: the whole range 1-65535 is the default. The range field is shorter and sits in one row with the Scan ports button; the result line is below them.

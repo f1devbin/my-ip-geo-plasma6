@@ -2215,11 +2215,6 @@ PlasmoidItem {
  implicitHeight: 32
         RowLayout { anchors.fill:parent
  spacing:6
-            Image { source:Qt.resolvedUrl("../images/cat.jpg")
- sourceSize.width:24
-sourceSize.height:24
-Layout.preferredWidth:24
-Layout.preferredHeight:24 }
             Text { Layout.fillWidth:true
 text:root.publicIp==="—"?"My IP & Geo":root.publicIp
 color:root.themeText
@@ -2243,31 +2238,17 @@ font.pixelSize:13 }
             anchors.margins: 14
             spacing: 6
 
-            RowLayout {
+            // Title on the same line as the header buttons (headerActions, 30 px high, top-right)
+            Text {
                 Layout.fillWidth: true
-                Layout.preferredHeight: 70
-                spacing: 10
-
-                Image {
-                    source: Qt.resolvedUrl("../images/cat.jpg")
-                    sourceSize.width: 64
-                    sourceSize.height: 64
-                    Layout.preferredWidth: 64
-                    Layout.preferredHeight: 64
-                    fillMode: Image.PreserveAspectFit
-                }
-
-                ColumnLayout {
-                    Layout.fillWidth: true
-                    spacing: 1
-
-                    Text {
-                        text: "My IP & Geo"
-                        color: root.themeText
-                        font.pixelSize: 19
-                        font.bold: true
-                    }
-                }
+                Layout.preferredHeight: 30
+                Layout.rightMargin: headerActions.width + 8
+                text: "My IP & Geo"
+                color: root.themeText
+                font.pixelSize: 19
+                font.bold: true
+                elide: Text.ElideRight
+                verticalAlignment: Text.AlignVCenter
             }
 
             RowLayout {
@@ -2713,7 +2694,7 @@ font.pixelSize:13 }
                             spacing: 5
                             Image { source: Qt.resolvedUrl("../images/github.svg"); sourceSize.width: 18; sourceSize.height: 18; Layout.preferredWidth: 18; Layout.preferredHeight: 18 }
                             Text { text: "GitHub"; color: root.themeLink; font.pixelSize: 13; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: Qt.openUrlExternally("https://github.com/f1devbin") } }
-                            Text { text: "· v6.1.48"; color: root.themeSecondary; font.pixelSize: 10 }
+                            Text { text: "· v6.1.49"; color: root.themeSecondary; font.pixelSize: 10 }
                             Item { Layout.fillWidth: true }
                         }
                     }
@@ -3210,12 +3191,14 @@ font.pixelSize:13 }
 
                                             Text { text: "Scan TCP ports on " + hostRow.ipKey; color: root.themeText; font.pixelSize: 10; font.bold: true }
 
-                                            // Port range and Scan in one row (default: the whole range 1-65535)
-                                            Row {
+                                            // Port range stretches with the widget; the magnifier Scan button stays at the right edge
+                                            RowLayout {
+                                                width: parent.width
                                                 spacing: 8
                                                 Controls.TextField {
                                                     id: rangeField
-                                                    width: 132
+                                                    Layout.fillWidth: true
+                                                    Layout.minimumWidth: 80
                                                     text: hostRow.prange
                                                     placeholderText: "e.g. 8000-9000"
                                                     font.pixelSize: 11
@@ -3224,10 +3207,18 @@ font.pixelSize:13 }
                                                     onAccepted: { root.setPortRange(hostRow.ipKey, text.trim()); root.runPortScan(hostRow.ipKey) }
                                                 }
                                                 Controls.Button {
-                                                    width: 108
-                                                    height: rangeField.height
-                                                    text: hostRow.pstate === "running" ? "Scanning\u2026" : "Scan ports"
+                                                    id: scanPortsButton
+                                                    Layout.preferredWidth: 36
+                                                    Layout.preferredHeight: rangeField.implicitHeight
+                                                    display: Controls.AbstractButton.IconOnly
+                                                    text: "Start scan"
+                                                    icon.name: "edit-find"
+                                                    icon.width: 16
+                                                    icon.height: 16
                                                     enabled: root.portScanIp === ""
+                                                    Controls.ToolTip.visible: hovered
+                                                    Controls.ToolTip.delay: 500
+                                                    Controls.ToolTip.text: "Start scan"
                                                     onClicked: { root.setPortRange(hostRow.ipKey, rangeField.text.trim()); root.runPortScan(hostRow.ipKey) }
                                                 }
                                             }
