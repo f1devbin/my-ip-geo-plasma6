@@ -131,6 +131,8 @@ PlasmoidItem {
     property string internetQuality: "unknown"
     property bool vpnActive: false
     property int statusSeq: 0
+    // Path to the internet from the last status check ("tun0#12/10.138.192.1/10.138.192.18")
+    property string netPath: ""
     property int monitorSeq: 0
     // Diagnostics: parsed result per check, checks still running, run id and times
     readonly property var diagChecks: ["link", "gateway", "dns", "internet", "web", "ipv6", "mtu", "route"]
@@ -380,10 +382,33 @@ PlasmoidItem {
         }
         if (item.ipv6 && item.ipv6.length) {
             rows.push({header: item.ipv6.length > 1 ? "IPv6  \u00b7  " + item.ipv6.length + " addresses" : "IPv6"})
-            for (var j = 0; j < item.ipv6.length; ++j)
-                rows.push({addr: item.ipv6[j] + "/" + item.ipv6Prefix[j], mask: "", fam: 6})
+            for (var j = 0; j < item.ipv6.length; ++j) {
+                var row = {addr: item.ipv6[j] + "/" + item.ipv6Prefix[j], mask: "", fam: 6}
+                if (root.isLinkLocal6(item.ipv6[j])) row.note = "link-local"
+                rows.push(row)
+            }
         }
         return rows
+    }
+
+    // fe80::/10: every IPv6 interface has one, it does not mean IPv6 from the network
+    function isLinkLocal6(addr) {
+        return /^fe[89ab][0-9a-f]:/i.test(String(addr || ""))
+    }
+
+    // Badge of a Local IPs card: a link-local IPv6 address alone does not count as IPv6
+    function ipBadge(item) {
+        if (!item) return ""
+        var v4 = !!(item.ipv4 && item.ipv4.length)
+        var v6 = false, linkLocal = false
+        for (var i = 0; item.ipv6 && i < item.ipv6.length; ++i) {
+            if (root.isLinkLocal6(item.ipv6[i])) linkLocal = true
+            else v6 = true
+        }
+        if (v4 && v6) return "IPv4 + IPv6"
+        if (v4) return "IPv4"
+        if (v6) return "IPv6"
+        return linkLocal ? "IPv6 link-local" : ""
     }
 
     function activeInterface() {
@@ -658,6 +683,22 @@ PlasmoidItem {
             dnsApi.connectSource("bash " + codePath("netdiag.sh") + " dnsmap " + Date.now())
         }
         refreshNetwork()
+    }
+
+    // Status line "VPN 0.21 tun0#12/10.138.192.1/10.138.192.18": state, probe time, path to the internet.
+    // A different path while online (VPN on, off or switched, another network) means a new public IP.
+    // While offline the last path is kept, so a short outage on the same path refreshes nothing.
+    function netPathChange(prevPath, text) {
+        var parts = String(text || "").trim().split(/\s+/)
+        var state = parts[0] || "OFFLINE"
+        var online = state === "VPN" || state === "ONLINE"
+        var path = online && parts[2] ? parts[2] : ""
+        return {
+            state: state,
+            online: online,
+            path: path || prevPath || "",
+            refresh: !!path && !!prevPath && path !== prevPath
+        }
     }
 
     // Header indicators (internet dot, VPN shield): one light check every 30 s
@@ -1993,10 +2034,14 @@ PlasmoidItem {
         id: statusApi; engine: "executable"
         onNewData: function(source, data) {
             statusApi.disconnectSource(source)
-            var state = String(data.stdout || "").trim().split(/\s+/)[0] || "OFFLINE"
-            root.internetStatus = state === "VPN" || state === "ONLINE" ? "Online" : "Offline"
-            root.internetQuality = state === "VPN" || state === "ONLINE" ? "online" : "offline"
-            root.vpnActive = state === "VPN"
+            var st = root.netPathChange(root.netPath, data.stdout)
+            root.internetStatus = st.online ? "Online" : "Offline"
+            root.internetQuality = st.online ? "online" : "offline"
+            root.vpnActive = st.state === "VPN"
+            root.netPath = st.path
+            // New path: public IP, Local IPs and DNS again. networkLoading is still set here,
+            // so refreshAll() does not start a second status check.
+            if (st.refresh) root.refreshAll()
             root.networkLoading = false
         }
     }
@@ -2497,7 +2542,7 @@ font.pixelSize:13 }
                                                     Text {
                                                         id: typeLabel
                                                         anchors.centerIn: parent
-                                                        text: (localRow.netItem.ipv4.length && localRow.netItem.ipv6.length) ? "IPv4 + IPv6" : (localRow.netItem.ipv4.length ? "IPv4" : "IPv6")
+                                                        text: root.ipBadge(localRow.netItem)
                                                         color: root.themeLink
                                                         font.pixelSize: 9
                                                         font.bold: true
@@ -2547,10 +2592,10 @@ font.pixelSize:13 }
                                                     }
                                                     Text {
                                                         id: maskText
-                                                        visible: modelData.header === undefined && !!modelData.mask
+                                                        visible: modelData.header === undefined && !!(modelData.mask || modelData.note)
                                                         anchors.right: parent.right
                                                         anchors.verticalCenter: parent.verticalCenter
-                                                        text: modelData.mask ? "mask " + modelData.mask : ""
+                                                        text: modelData.mask ? "mask " + modelData.mask : (modelData.note || "")
                                                         color: root.themeSecondary
                                                         font.pixelSize: 10
                                                     }
@@ -2693,8 +2738,8 @@ font.pixelSize:13 }
                         RowLayout {
                             spacing: 5
                             Image { source: Qt.resolvedUrl("../images/github.svg"); sourceSize.width: 18; sourceSize.height: 18; Layout.preferredWidth: 18; Layout.preferredHeight: 18 }
-                            Text { text: "GitHub"; color: root.themeLink; font.pixelSize: 13; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: Qt.openUrlExternally("https://github.com/f1devbin") } }
-                            Text { text: "· v6.1.49"; color: root.themeSecondary; font.pixelSize: 10 }
+                            Text { text: "GitHub"; color: root.themeLink; font.pixelSize: 13; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: Qt.openUrlExternally("https://github.com/f1devbin/my-ip-geo-plasma6") } }
+                            Text { text: "· v6.1.50"; color: root.themeSecondary; font.pixelSize: 10 }
                             Item { Layout.fillWidth: true }
                         }
                     }
@@ -3014,6 +3059,8 @@ font.pixelSize:13 }
                     Rectangle {
                         Layout.fillWidth: true
                         Layout.preferredHeight: 26
+                        // as wide as the device rows, which leave room for the scroll bar
+                        Layout.rightMargin: scanFlick.barSpace
                         radius: 6
                         color: root.alpha(root.themeText, .035)
                         border.width: 1
@@ -3031,6 +3078,9 @@ font.pixelSize:13 }
                     }
 
                     Flickable {
+                        id: scanFlick
+                        // room for the scroll bar while the list is longer than the view
+                        readonly property real barSpace: contentHeight > height + 1 ? scanScroll.width + 4 : 0
                         Layout.fillWidth: true
                         Layout.fillHeight: true
                         clip: true
@@ -3038,10 +3088,15 @@ font.pixelSize:13 }
                         contentHeight: scanHostColumn.height
                         interactive: contentHeight > height
                         boundsBehavior: Flickable.StopAtBounds
+                        Controls.ScrollBar.vertical: Controls.ScrollBar {
+                            id: scanScroll
+                            policy: Controls.ScrollBar.AlwaysOn
+                            visible: scanFlick.contentHeight > scanFlick.height + 1
+                        }
 
                         Column {
                             id: scanHostColumn
-                            width: parent.width
+                            width: parent.width - scanFlick.barSpace
                             spacing: 3
 
                             Repeater {
@@ -3372,8 +3427,8 @@ font.pixelSize:13 }
                         }
                         Column {
                             id: diagColumn
-                            // the style's own scroll bar width: Breeze's is wider than 10 px and covered the values
-                            width: parent.width - diagScroll.width - 4
+                            // room for the style's own scroll bar (Breeze's is wider than 10 px), only while it is shown
+                            width: parent.width - (diagFlick.contentHeight > diagFlick.height + 1 ? diagScroll.width + 4 : 0)
                             spacing: 8
 
                             // The chain: connection -> router -> DNS -> internet -> websites

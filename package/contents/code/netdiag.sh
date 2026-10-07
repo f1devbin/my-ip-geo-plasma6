@@ -4,7 +4,7 @@
 # iw, nmcli, resolvectl and timedatectl add details when they are installed.
 #
 #   netdiag.sh <check> [run-id]        the run-id only makes every command string unique
-#     status    ONLINE <s> | VPN <s> | OFFLINE (header indicators)
+#     status    ONLINE <s> <path> | VPN <s> <path> | OFFLINE (header indicators; a new path refreshes the public IP)
 #     dnsmap    DNS servers per interface as "Link N (dev): servers" (Local IPs tab)
 #     link      default routes, adapter type, Wi-Fi link, VPN interfaces
 #     gateway   5 pings to the router and its ARP entry
@@ -95,6 +95,19 @@ vpn_ifaces() {
     done
 }
 
+# The path to the internet as one word: <device>#<ifindex>/<gateway>/<source address>.
+# It changes when a VPN connects, disconnects or reconnects (a new interface gets a new index)
+# and when the computer joins another network.
+net_path() {
+    local r dev via src idx
+    r=$(ip -4 route get "$TARGET" 2>/dev/null | head -n 1)
+    dev=$(printf '%s\n' "$r" | sed -n 's/.* dev \([^ ]*\).*/\1/p')
+    via=$(printf '%s\n' "$r" | sed -n 's/.* via \([^ ]*\).*/\1/p')
+    src=$(printf '%s\n' "$r" | sed -n 's/.* src \([^ ]*\).*/\1/p')
+    [ -n "$dev" ] && idx=$(cat "$NET/$dev/ifindex" 2>/dev/null)
+    echo "${dev:--}#${idx:-0}/${via:--}/${src:--}"
+}
+
 check_status() {
     local route=0 t="" url conn
     ip -4 route show default 2>/dev/null | grep -q . && route=1
@@ -111,11 +124,32 @@ check_status() {
         conn=$(nmcli -t -f CONNECTIVITY networking connectivity check 2>/dev/null | head -n 1)
         [ "$conn" = full ] || { echo OFFLINE; return; }
     fi
-    if [ -n "$(vpn_ifaces)" ]; then echo "VPN ${t:-0}"; else echo "ONLINE ${t:-0}"; fi
+    if [ -n "$(vpn_ifaces)" ]; then echo "VPN ${t:-0} $(net_path)"; else echo "ONLINE ${t:-0} $(net_path)"; fi
+}
+
+# DNS servers per interface for Local IPs and Diagnostics, each server once
+check_dnsmap() { dnsmap_raw | dns_clean; }
+
+# resolvectl also lists an IPv4 server as IPv4-mapped IPv6 (127.0.2.2 and ::ffff:127.0.2.2):
+# the mapped form becomes the plain IPv4 address and repeats are dropped
+dns_clean() {
+    awk '{
+        line = ""; srv = 0; split("", seen)
+        for (i = 1; i <= NF; i++) {
+            f = $i
+            if (srv) {
+                if (f ~ /^::[fF][fF][fF][fF]:[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+([#%].*)?$/) sub(/^::[fF][fF][fF][fF]:/, "", f)
+                if (f in seen) continue
+                seen[f] = 1
+            } else if (f ~ /:$/) srv = 1
+            line = line (line == "" ? "" : " ") f
+        }
+        print line
+    }'
 }
 
 # resolvectl when systemd-resolved runs, else NetworkManager, else /etc/resolv.conf
-check_dnsmap() {
+dnsmap_raw() {
     if have resolvectl && resolvectl --no-pager dns > "$tmp/r" 2>/dev/null && grep -q '): [^ ]' "$tmp/r"; then
         cat "$tmp/r"
         return

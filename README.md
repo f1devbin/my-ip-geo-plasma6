@@ -4,7 +4,7 @@ A compact KDE Plasma 6 widget for your public IP address and location, your loca
 
 It needs no root rights and nothing extra to install on Kubuntu: it only uses tools that are already there (curl, iproute2, ping, bash, Perl).
 
-**Version 6.1.49** · [Changelog](CHANGELOG.md) · [Download](https://github.com/f1devbin/my-ip-geo-plasma6/releases/latest)
+**Version 6.1.50** · [Changelog](CHANGELOG.md) · [Download](https://github.com/f1devbin/my-ip-geo-plasma6/releases/latest)
 
 <img src="screenshots/main.png" width="480" alt="Main view: public IP, location, provider, traffic">
 

@@ -2,6 +2,15 @@
 
 All changes of My IP & Geo, newest first.
 
+## v6.1.50
+- Public IP follows a VPN switch. The 30-second status check now also reports the path to the internet (interface, its index, gateway, source address). When the path changes while online — VPN connected, disconnected, reconnected or switched (WARP → OpenVPN), another network — the public IP, Local IPs and DNS are read again at once instead of after up to 10 minutes. After an outage on the same path nothing is re-read. Script: `contents/code/netdiag.sh status`.
+- DNS: a server listed by systemd-resolved both as IPv4 and as IPv4-mapped IPv6 (127.0.2.2 and ::ffff:127.0.2.2 with Cloudflare WARP) is shown once, as IPv4, in Local IPs and in Diagnostics.
+- Local IPs: a link-local IPv6 address (fe80::…, every IPv6 interface has one) is marked "link-local" and no longer makes the badge say "IPv4 + IPv6"; an OpenVPN tun0 with an IPv4 address and only fe80:: is "IPv4". An interface with nothing but link-local IPv6 says "IPv6 link-local".
+- Scanner: the device list has a scroll bar when it is longer than the view (like Apps and Diagnostics); the column header narrows with the list so the columns stay aligned.
+- Diagnostics: the room for the scroll bar is kept only while the bar is shown. Before, the tiles and the route list ended about 24 px left of the verdict box and the Run again button when everything fitted.
+- New widget icon (`contents/icon.png`: widget list, notifications): the cat stands turned a little towards the words "IP / & / Geo", one per line, and points at them with its paw; the Windows logo and the stream are gone. The header picture `contents/images/cat.jpg` is unchanged and not used since 6.1.49.
+- The GitHub link in the footer opens the widget's repository, https://github.com/f1devbin/my-ip-geo-plasma6, instead of the author's profile.
+
 ## v6.1.49
 - Port scan: the range field stretches with the widget width, the scan button sits at the right edge of the same row and shows a magnifier icon instead of the text "Scan ports" (tooltip "Start scan"). While a scan runs the button is disabled; the status line and the progress bar below show the progress.
 - No cat picture in the widget: the header is one line, the title "My IP & Geo" next to the indicators and buttons, so the tabs and the content start about 40 px higher. The panel view (widget in a panel) shows the IP address and the status dot without the picture. The widget icon (`contents/icon.png`, widget list and Monitor notifications) is unchanged.
