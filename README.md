@@ -4,7 +4,7 @@ A compact KDE Plasma 6 widget for your public IP address and location, your loca
 
 It needs no root rights and nothing extra to install on Kubuntu: it only uses tools that are already there (curl, iproute2, ping, bash, Perl).
 
-**Version 6.1.50** · [Changelog](CHANGELOG.md) · [Download](https://github.com/f1devbin/my-ip-geo-plasma6/releases/latest)
+**Version 6.1.51** · [Changelog](CHANGELOG.md) · [Download](https://github.com/f1devbin/my-ip-geo-plasma6/releases/latest)
 
 <img src="screenshots/main.png" width="480" alt="Main view: public IP, location, provider, traffic">
 
@@ -18,7 +18,7 @@ It needs no root rights and nothing extra to install on Kubuntu: it only uses to
 
 **Network tools** (the ☰ button):
 
-- **Scanner.** Finds every device on the local network, including devices that ignore ping (they are found through ARP), and shows router and reverse-DNS names. The magnifier button next to a device scans its TCP ports: the whole range 1-65535 by default, or any range you enter. The whole range takes about a second on a LAN, or about 20 seconds when the device's firewall silently drops closed ports.
+- **Scanner.** Finds every device on the local network (any network up to /20, the /24 around this computer by default), including devices that ignore ping (they are found through ARP), and shows router and reverse-DNS names. The magnifier button next to a device scans its TCP ports: the whole range 1-65535 by default, or any range you enter. The whole range takes about a second on a LAN, or about 20 seconds when the device's firewall silently drops closed ports.
 - **Diagnostics.** Checks the chain connection → router → DNS → internet → websites and names the first broken link in plain words, or shows "Everything works" with latency, jitter and packet loss. Also shows the public IP and Cloudflare location, IPv6, VPN, path MTU and the route to 1.1.1.1 with the latency of each hop, and warns about weak Wi-Fi, packet loss, slow or hijacked DNS, broken IPv6 and sign-in pages (captive portals).
 - **Speed.** Download and upload over 4 parallel streams, ping and jitter, against Cloudflare's speed test servers.
 - **Apps.** Which applications use the network: traffic leaders for the last hour, the last 24 hours or since boot, with the live speed and the connections of each application. Uses the helper of KDE System Monitor.

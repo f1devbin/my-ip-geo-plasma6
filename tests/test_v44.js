@@ -1,7 +1,8 @@
 // v6.1.44: Local IPs - subnet mask without the "(/p)" suffix; one flat row list per interface
+// (v6.1.50: a link-local IPv6 row carries note "link-local")
 const assert = require('assert');
 const { load } = require('./extract');
-const root = load(process.argv[2], ['plainMask', 'ifaceAddrRows']);
+const root = load(process.argv[2], ['plainMask', 'ifaceAddrRows', 'isLinkLocal6']);
 let passed = 0;
 function t(name, fn) { fn(); passed++; console.log('ok  -', name); }
 
@@ -24,7 +25,7 @@ t('ifaceAddrRows: header rows then one address row each; IPv4 with mask, IPv6 wi
   assert.deepStrictEqual(rows[1], {addr: '10.0.8.15/21', mask: '255.255.248.0', fam: 4});
   assert.deepStrictEqual(rows[2], {addr: '192.168.10.15/24', mask: '255.255.255.0', fam: 4});
   assert.deepStrictEqual(rows[3], {header: 'IPv6'});
-  assert.deepStrictEqual(rows[4], {addr: 'fe80::a1b2:c3d4:e5f6:7788/64', mask: '', fam: 6});
+  assert.deepStrictEqual(rows[4], {addr: 'fe80::a1b2:c3d4:e5f6:7788/64', mask: '', fam: 6, note: 'link-local'});
 });
 
 t('ifaceAddrRows: single IPv4 uses a plain "IPv4" header; empty families are skipped', () => {

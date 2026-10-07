@@ -2,6 +2,13 @@
 
 All changes of My IP & Geo, newest first.
 
+## v6.1.51
+- Scanner: networks up to /20 (4096 addresses) can be scanned, e.g. 10.2.48.0/21; before, anything bigger than /22 was refused. The limit came from the kernel's neighbour table (1024 entries by default): in a big network the kernel drops entries older than 5 s, so a device that only answers ARP and was found early could be gone when the table was read once at the end. Now the answered entries are collected every 2 s while the scan runs. A /21 takes about 20 s, a /24 about 10 s; the status line shows how many addresses are scanned. The default stays the /24 around this device; a bigger network is typed into the field.
+- Footer Received / Sent count physical adapters only (Ethernet, Wi-Fi, USB, mobile). Before, all interfaces were added up, so with a VPN every byte was counted twice (tunnel and adapter), and Docker bridges and veth pairs added more. Without any physical adapter (e.g. in a container) all interfaces except lo are counted as before.
+- Monitor accepts one IP address (IPv4 with "," or leading zeros is normalised, or IPv6). Anything else, e.g. a network "10.2.50.0/24" or a name, shows a red hint instead of adding a device that could never be checked.
+- The 10-minute refresh no longer waits for both the public IP and Local IPs to be idle: a Local IPs read that never finished blocked the public IP refresh for good. Each part keeps its own busy check.
+- Network scan and speed test commands carry a run number, so running them again can never get the previous result from Plasma's command cache.
+
 ## v6.1.50
 - Public IP follows a VPN switch. The 30-second status check now also reports the path to the internet (interface, its index, gateway, source address). When the path changes while online — VPN connected, disconnected, reconnected or switched (WARP → OpenVPN), another network — the public IP, Local IPs and DNS are read again at once instead of after up to 10 minutes. After an outage on the same path nothing is re-read. Script: `contents/code/netdiag.sh status`.
 - DNS: a server listed by systemd-resolved both as IPv4 and as IPv4-mapped IPv6 (127.0.2.2 and ::ffff:127.0.2.2 with Cloudflare WARP) is shown once, as IPv4, in Local IPs and in Diagnostics.

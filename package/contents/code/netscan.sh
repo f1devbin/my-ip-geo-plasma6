@@ -5,7 +5,7 @@
 # resolves the address with ARP, so devices that ignore ping (phones, Windows with
 # a firewall) still answer ARP and show up in the neighbour table with their MAC.
 #
-#   netscan.sh scan <a.b.c.d/prefix>   prints: __INFO__ <count> | UP <ip> ... | __NEIGH__ + `ip -4 neigh show`
+#   netscan.sh scan <a.b.c.d/prefix> [runid]   prints: __INFO__ <count> | UP <ip> ... | __NEIGH__ + `ip -4 neigh show`
 #   netscan.sh names <ip>...            prints "<ip> <hostname>" for addresses with a reverse name
 
 set -f  # no globbing: word splitting below is intentional
@@ -32,9 +32,22 @@ scan() {
     bcast=$(( net | (~mask & 0xFFFFFFFF) ))
     if [ "$bits" -ge 31 ]; then first=$net; last=$bcast; else first=$(( net + 1 )); last=$(( bcast - 1 )); fi
     count=$(( last - first + 1 ))
-    # Bigger ranges would flood the kernel neighbour table (default limit 1024 entries)
-    [ "$count" -le 1024 ] || { echo "__TOOBIG__ $count"; return; }
+    # Up to a /20: a /21 takes about 20 s, a bigger network would take minutes
+    [ "$count" -le 4096 ] || { echo "__TOOBIG__ $count"; return; }
     echo "__INFO__ $count"
+
+    # The kernel keeps 1024 neighbour entries by default and drops entries older than 5 s when
+    # the table is full. In a big network an early answer to ARP would be gone before the scan
+    # ends, so the answered entries are collected every 2 s while the pings run.
+    tmp=$(mktemp -d 2>/dev/null) || { tmp=/tmp/myipgeo-scan.$$; mkdir -p "$tmp"; }
+    trap 'rm -rf "$tmp"' EXIT
+    (
+        while [ ! -e "$tmp/stop" ]; do
+            ip -4 neigh show nud reachable >> "$tmp/seen" 2>/dev/null
+            sleep 2
+        done
+    ) &
+    reader=$!
 
     i=$first
     while [ "$i" -le "$last" ]; do
@@ -50,8 +63,11 @@ scan() {
         sleep 1
         n=$(( n + 1 ))
     done
+    : > "$tmp/stop"
+    wait "$reader" 2>/dev/null
     echo __NEIGH__
     ip -4 neigh show
+    sort -u "$tmp/seen" 2>/dev/null
 }
 
 names() {

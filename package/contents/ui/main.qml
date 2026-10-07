@@ -53,6 +53,10 @@ PlasmoidItem {
     property bool scanCidrUserEdited: false
     property bool scanLoading: false
     property string scanStatus: ""
+    property int scanSeq: 0
+    property int trafficSeq: 0
+    property int speedRunSeq: 0
+    property string monitorError: ""
     property var scanHosts: []
     property var scanNames: ({})
     property string scanRunCidr: ""
@@ -451,8 +455,8 @@ PlasmoidItem {
         var item = scanInterface()
         if (!item || !item.ipv4.length || !item.ipv4Prefix.length) return
         var prefix = parseInt(item.ipv4Prefix[0])
-        // Networks bigger than /22 are scanned as the /24 around this device
-        var cidr = ipv4Network(item.ipv4[0], prefix < 22 ? 24 : prefix)
+        // Default: the /24 around this device (a bigger network, up to /20, can be typed in)
+        var cidr = ipv4Network(item.ipv4[0], prefix < 24 ? 24 : prefix)
         if (cidr && !root.scanCidrUserEdited) root.scanCidr = cidr
     }
 
@@ -481,7 +485,7 @@ PlasmoidItem {
         var out = String(text || "")
         if (out.indexOf("__BADCIDR__") !== -1) return {error: "Invalid network address", hosts: []}
         var big = out.match(/__TOOBIG__ (\d+)/)
-        if (big) return {error: "Network too large (" + big[1] + " addresses, max 1024)", hosts: []}
+        if (big) return {error: "Network too large (" + big[1] + " addresses, max 4096 = /20)", hosts: []}
         if (out.indexOf("__NEIGH__") === -1) return {error: "Scan failed", hosts: []}
         var m = String(cidr).match(/^(\d+\.\d+\.\d+\.\d+)(?:\/(\d+))?$/)
         if (!m) return {error: "Invalid network address", hosts: []}
@@ -519,6 +523,14 @@ PlasmoidItem {
         return {error: "", hosts: hosts}
     }
 
+    // "Scanning 2046 addresses…" while a scan runs
+    function scanProgressText(cidr) {
+        var m = String(cidr || "").match(/\/(\d+)$/)
+        var bits = m ? +m[1] : 32
+        var n = bits >= 31 ? Math.pow(2, 32 - bits) : Math.pow(2, 32 - bits) - 2
+        return "Scanning " + n + " address" + (n === 1 ? "" : "es") + "…"
+    }
+
     function runNetworkScan() {
         if (scanLoading) return
         var cidr = String(scanCidr || "").trim()
@@ -527,13 +539,15 @@ PlasmoidItem {
             scanStatus = "Enter a network like 192.168.1.0/24"
             return
         }
-        if (m[5] !== undefined && +m[5] < 22) {
-            scanStatus = "Too large: use /22 or smaller"
+        if (m[5] !== undefined && +m[5] < 20) {
+            scanStatus = "Too large: use /20 or smaller"
             return
         }
         scanLoading = true
         scanRunCidr = cidr
-        scanApi.connectSource("sh " + codePath("netscan.sh") + " scan " + cidr)
+        // A new command string every run: the same string again can return the previous result
+        scanSeq += 1
+        scanApi.connectSource("sh " + codePath("netscan.sh") + " scan " + cidr + " " + scanSeq)
     }
 
     // ----- Scanner: per-host TCP port check (portscan.sh) -----
@@ -616,16 +630,31 @@ PlasmoidItem {
         }
     }
 
+    // A single IPv4 address (leading zeros dropped) or an IPv6 address; "" for anything else
+    function normalizeIp(text) {
+        var t = String(text || "").trim().replace(/,/g, ".")
+        var m = t.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/)
+        if (m) {
+            for (var i = 1; i <= 4; ++i) if (+m[i] > 255) return ""
+            return +m[1] + "." + +m[2] + "." + +m[3] + "." + +m[4]
+        }
+        if (/^[0-9a-fA-F:]+$/.test(t) && t.indexOf(":") !== -1 && t.length >= 2 && t.length <= 39) return t.toLowerCase()
+        return ""
+    }
+
+    // Returns false (and sets monitorError) when the text is not one IP address
     function addWatchedDevice(ip, mac) {
-        var safeIp = String(ip || "").trim().replace(/[^0-9a-fA-F:./]/g, "")
-        if (!safeIp) return
+        var safeIp = root.normalizeIp(ip)
+        if (!safeIp) { root.monitorError = "Not an IP address: enter one address like 192.168.1.10"; return false }
+        root.monitorError = ""
         var list = root.watchedDevices.slice(0)
-        for (var i = 0; i < list.length; ++i) if (list[i].ip === safeIp) return
+        for (var i = 0; i < list.length; ++i) if (list[i].ip === safeIp) return true
         list.push({ ip: safeIp, mac: mac || "—", status: "Unknown", lastCheck: "—" })
         root.watchedDevices = list
         saveWatchedDevices()
         root.toolsTab = 5
         monitorWatchedDevices()
+        return true
     }
 
     function removeWatchedDevice(index) {
@@ -1836,7 +1865,8 @@ PlasmoidItem {
         speedSampleTime = 0
         speedPhase = phase
         speedStatus = phase === "ping" ? "Measuring ping…" : (phase === "download" ? "Measuring download…" : "Measuring upload…")
-        var cmd = "sh " + codePath("speedtest.sh") + " " + (phase === "download" ? "down" : (phase === "upload" ? "up" : "ping"))
+        root.speedRunSeq += 1
+        var cmd = "sh " + codePath("speedtest.sh") + " " + (phase === "download" ? "down" : (phase === "upload" ? "up" : "ping")) + " " + root.speedRunSeq
         Qt.callLater(function() { speedApi.connectSource(cmd) })
     }
 
@@ -1974,7 +2004,10 @@ PlasmoidItem {
     }
 
     function refreshTraffic() {
-        trafficApi.connectSource("awk 'NR > 2 && $1 != \"lo:\" {rx += $2; tx += $10} END {printf \"%s %s\\n\", rx+0, tx+0}' /proc/net/dev")
+        // Physical adapters only (they have a device in sysfs): VPN tunnels, bridges and veth carry
+        // the same bytes a second time. Without any, every interface but lo.
+        root.trafficSeq += 1
+        trafficApi.connectSource("MYIPGEO_SEQ=" + root.trafficSeq + " sh -c 'rx=0; tx=0; n=0; for d in /sys/class/net/*; do [ -e \"$d/device\" ] || continue; read r < \"$d/statistics/rx_bytes\" && read t < \"$d/statistics/tx_bytes\" || continue; rx=$((rx + r)); tx=$((tx + t)); n=$((n + 1)); done; [ $n -gt 0 ] || for d in /sys/class/net/*; do [ \"${d##*/}\" = lo ] && continue; read r < \"$d/statistics/rx_bytes\" && read t < \"$d/statistics/tx_bytes\" || continue; rx=$((rx + r)); tx=$((tx + t)); done; echo \"$rx $tx\"'")
     }
 
     Plasma5Support.DataSource {
@@ -2248,7 +2281,7 @@ PlasmoidItem {
     Timer { interval:600000
  repeat:true
  running:true
- onTriggered: { if(!root.loading&&!root.localLoading)root.refreshAll(); root.monitorWatchedDevices() } }
+ onTriggered: { root.refreshAll(); root.monitorWatchedDevices() } }
     Timer { interval:30000
  repeat:true
  running:true
@@ -2739,7 +2772,7 @@ font.pixelSize:13 }
                             spacing: 5
                             Image { source: Qt.resolvedUrl("../images/github.svg"); sourceSize.width: 18; sourceSize.height: 18; Layout.preferredWidth: 18; Layout.preferredHeight: 18 }
                             Text { text: "GitHub"; color: root.themeLink; font.pixelSize: 13; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: Qt.openUrlExternally("https://github.com/f1devbin/my-ip-geo-plasma6") } }
-                            Text { text: "· v6.1.50"; color: root.themeSecondary; font.pixelSize: 10 }
+                            Text { text: "· v6.1.51"; color: root.themeSecondary; font.pixelSize: 10 }
                             Item { Layout.fillWidth: true }
                         }
                     }
@@ -2967,10 +3000,10 @@ font.pixelSize:13 }
                     RowLayout {
                         Layout.fillWidth: true
                         Text { text: "Network Scanner"; color: root.themeText; font.pixelSize: 13; font.bold: true; Layout.fillWidth: true }
-                        Text { text: root.scanLoading ? "Scanning…" : root.scanStatus; color: root.scanLoading ? root.themeHighlight : root.themeSecondary; font.pixelSize: 9 }
+                        Text { text: root.scanLoading ? root.scanProgressText(root.scanRunCidr) : root.scanStatus; color: root.scanLoading ? root.themeHighlight : root.themeSecondary; font.pixelSize: 9 }
                     }
                     Text {
-                        text: "Finds every device on the network, including ones that ignore ping (they still answer ARP). A scan takes about 10 seconds. Press the magnifier next to a device to scan its open ports."
+                        text: "Finds every device on the network, including ones that ignore ping (they still answer ARP). A /24 takes about 10 seconds, a /21 about 20. Press the magnifier next to a device to scan its open ports."
                         color: root.themeSecondary
                         font.pixelSize: 10
                         Layout.fillWidth: true
@@ -4080,6 +4113,7 @@ font.pixelSize:13 }
                             placeholderText: "IP address"
                             selectByMouse: true
                             onTextChanged: {
+                                root.monitorError = ""
                                 var normalized = text.replace(/,/g, ".")
                                 if (normalized !== text) text = normalized
                             }
@@ -4087,8 +4121,16 @@ font.pixelSize:13 }
                         Controls.Button {
                             text: "Add"
                             enabled: monitorIpField.text.trim() !== ""
-                            onClicked: { root.addWatchedDevice(monitorIpField.text, "—"); monitorIpField.clear() }
+                            onClicked: { if (root.addWatchedDevice(monitorIpField.text, "—")) monitorIpField.clear() }
                         }
+                    }
+                    Text {
+                        visible: root.monitorError !== ""
+                        text: root.monitorError
+                        color: root.themeNegative
+                        font.pixelSize: 10
+                        Layout.fillWidth: true
+                        wrapMode: Text.Wrap
                     }
                     Text {
                         text: root.watchedDevices.length ? "Status is checked every 30 seconds." : "Add an IP or use Watch from Network Scanner."
