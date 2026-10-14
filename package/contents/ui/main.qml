@@ -160,6 +160,14 @@ PlasmoidItem {
     property var speedSamplePrev: ({})
     property real speedSampleTime: 0
     property string trafficReceived: "—"
+    // CPU, memory and swap below the traffic bar: -1 = not read yet
+    property real cpuPct: -1
+    property var cpuPrev: null
+    property real memUsed: -1
+    property real memTotal: 0
+    property real swapUsed: -1
+    property real swapTotal: 0
+    property int sysSeq: 0
     property string trafficSent: "—"
     property string trafficUpdated: "—"
 
@@ -2003,6 +2011,57 @@ PlasmoidItem {
         return (n / (1024 * 1024 * 1024 * 1024)).toFixed(2) + " TB"
     }
 
+    // "cpu  user nice system idle iowait irq softirq steal" + MemTotal/MemAvailable/SwapTotal/SwapFree in kB.
+    // CPU load is the busy share of the time since the previous sample (null before the second one).
+    function parseSysStat(text, prev) {
+        var t = String(text || "")
+        var r = {cpu: null, sample: null, memTotal: 0, memUsed: -1, swapTotal: 0, swapUsed: -1}
+        var c = t.match(/^cpu\s+(\d+(?:\s+\d+)*)/m)
+        if (c) {
+            var f = c[1].split(/\s+/).map(Number)
+            var total = 0
+            for (var i = 0; i < f.length && i < 8; ++i) total += f[i]
+            var idle = f[3] + (f.length > 4 ? f[4] : 0)
+            r.sample = {total: total, idle: idle}
+            if (prev && total > prev.total) r.cpu = Math.max(0, Math.min(100, 100 * (1 - (idle - prev.idle) / (total - prev.total))))
+        }
+        function kb(name) { var m = t.match(new RegExp("^" + name + ":\\s+(\\d+)", "m")); return m ? +m[1] * 1024 : -1 }
+        var mt = kb("MemTotal"), ma = kb("MemAvailable"), st = kb("SwapTotal"), sf = kb("SwapFree")
+        if (mt > 0 && ma >= 0) { r.memTotal = mt; r.memUsed = Math.max(0, mt - ma) }
+        if (st >= 0 && sf >= 0) { r.swapTotal = st; r.swapUsed = Math.max(0, st - sf) }
+        return r
+    }
+
+    // Bar colour by load: green, yellow from 60 %, red from 85 %
+    function loadColor(pct) {
+        if (!(pct >= 0)) return root.alpha(root.themeText, 0.35)
+        if (pct >= 85) return root.themeNegative
+        if (pct >= 60) return root.statusColor(root.themeBackgroundRaw, Qt.rgba(0.88, 0.63, 0.19, 1))
+        return root.themePositive
+    }
+
+    // "5.1 / 15.5 GB · 33%"
+    function usageText(used, total) {
+        if (!(used >= 0) || !(total > 0)) return "—"
+        var g = 1024 * 1024 * 1024
+        var unit = total >= g ? g : 1024 * 1024
+        var dec = unit === g ? 1 : 0
+        return (used / unit).toFixed(dec) + " / " + (total / unit).toFixed(dec) + (unit === g ? " GB" : " MB") + " · " + Math.round(100 * used / total) + "%"
+    }
+
+    // One row of the system bars: label, load in percent (-1 = unknown) and the value text
+    function sysRow(i, cpu, memUsed, memTotal, swapUsed, swapTotal) {
+        if (i === 0) return {label: "CPU", pct: cpu, text: cpu >= 0 ? Math.round(cpu) + "%" : "—"}
+        if (i === 1) return {label: "Memory", pct: memTotal > 0 ? 100 * memUsed / memTotal : -1, text: root.usageText(memUsed, memTotal)}
+        return {label: "Swap", pct: swapTotal > 0 ? 100 * swapUsed / swapTotal : -1,
+                text: swapTotal > 0 ? root.usageText(swapUsed, swapTotal) : (swapUsed >= 0 ? "no swap" : "—")}
+    }
+
+    function refreshSystem() {
+        root.sysSeq += 1
+        sysApi.connectSource("MYIPGEO_SEQ=" + root.sysSeq + " sh -c 'head -n 1 /proc/stat; grep -E \"^(MemTotal|MemAvailable|SwapTotal|SwapFree):\" /proc/meminfo'")
+    }
+
     function refreshTraffic() {
         // Physical adapters only (they have a device in sysfs): VPN tunnels, bridges and veth carry
         // the same bytes a second time. Without any, every interface but lo.
@@ -2132,6 +2191,18 @@ PlasmoidItem {
             speedSampleApi.connectSource("MYIPGEO_SEQ=" + root.speedSampleSeq + " cat /proc/net/dev")
         }
     }
+    Plasma5Support.DataSource {
+        id: sysApi; engine: "executable"
+        onNewData: function(source, data) {
+            sysApi.disconnectSource(source)
+            var r = root.parseSysStat(data.stdout, root.cpuPrev)
+            if (r.sample) root.cpuPrev = r.sample
+            if (r.cpu !== null) root.cpuPct = r.cpu
+            if (r.memUsed >= 0) { root.memTotal = r.memTotal; root.memUsed = r.memUsed }
+            if (r.swapUsed >= 0) { root.swapTotal = r.swapTotal; root.swapUsed = r.swapUsed }
+        }
+    }
+    Timer { interval: 2000; repeat: true; running: true; triggeredOnStart: true; onTriggered: root.refreshSystem() }
     Plasma5Support.DataSource { id: trafficApi; engine:"executable"; onNewData:function(source,data){trafficApi.disconnectSource(source);var p=String(data.stdout||"").trim().split(/\s+/);if(p.length>=2){root.trafficReceived=root.formatBytes(p[0]);root.trafficSent=root.formatBytes(p[1]);root.trafficUpdated=Qt.formatTime(new Date(),"HH:mm:ss")}} }
     Plasma5Support.DataSource {
         id: appUsageApi; engine: "executable"
@@ -2772,8 +2843,61 @@ font.pixelSize:13 }
                             spacing: 5
                             Image { source: Qt.resolvedUrl("../images/github.svg"); sourceSize.width: 18; sourceSize.height: 18; Layout.preferredWidth: 18; Layout.preferredHeight: 18 }
                             Text { text: "GitHub"; color: root.themeLink; font.pixelSize: 13; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: Qt.openUrlExternally("https://github.com/f1devbin/my-ip-geo-plasma6") } }
-                            Text { text: "· v6.1.51"; color: root.themeSecondary; font.pixelSize: 10 }
+                            Text { text: "· v6.1.52"; color: root.themeSecondary; font.pixelSize: 10 }
                             Item { Layout.fillWidth: true }
+                        }
+                    }
+                }
+            }
+
+            // CPU, memory and swap: a bar each, coloured by load
+            Rectangle {
+                id: systemBar
+                Layout.fillWidth: true
+                Layout.preferredHeight: systemRows.implicitHeight + 16
+                radius: 12
+                color: root.alpha(root.themeText, 0.035)
+                border.width: 1
+                border.color: root.alpha(root.themeText, 0.10)
+
+                ColumnLayout {
+                    id: systemRows
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.leftMargin: 12
+                    anchors.rightMargin: 12
+                    spacing: 6
+
+                    Repeater {
+                        // A fixed model: the rows stay, only their values change (the bars animate)
+                        model: 3
+                        delegate: RowLayout {
+                            readonly property var row: root.sysRow(index, root.cpuPct, root.memUsed, root.memTotal, root.swapUsed, root.swapTotal)
+                            Layout.fillWidth: true
+                            spacing: 8
+                            Text { text: row.label; color: root.themeText; font.pixelSize: 11; font.bold: true; Layout.preferredWidth: 52 }
+                            Rectangle {
+                                Layout.fillWidth: true
+                                Layout.preferredHeight: 8
+                                radius: 4
+                                color: root.alpha(root.themeText, 0.12)
+                                Rectangle {
+                                    width: parent.width * Math.max(0, Math.min(1, row.pct / 100))
+                                    height: parent.height
+                                    radius: 4
+                                    color: root.loadColor(row.pct)
+                                    Behavior on width { NumberAnimation { duration: 400; easing.type: Easing.OutCubic } }
+                                    Behavior on color { ColorAnimation { duration: 400 } }
+                                }
+                            }
+                            Text {
+                                text: row.text
+                                color: row.pct >= 85 ? root.themeNegative : root.themeText
+                                font.pixelSize: 11
+                                horizontalAlignment: Text.AlignRight
+                                Layout.preferredWidth: 128
+                            }
                         }
                     }
                 }

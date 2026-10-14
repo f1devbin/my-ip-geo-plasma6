@@ -4,7 +4,7 @@ A compact KDE Plasma 6 widget for your public IP address and location, your loca
 
 It needs no root rights and nothing extra to install on Kubuntu: it only uses tools that are already there (curl, iproute2, ping, bash, Perl).
 
-**Version 6.1.51** · [Changelog](CHANGELOG.md) · [Download](https://github.com/f1devbin/my-ip-geo-plasma6/releases/latest)
+**Version 6.1.52** · [Changelog](CHANGELOG.md) · [Download](https://github.com/f1devbin/my-ip-geo-plasma6/releases/latest)
 
 <img src="screenshots/main.png" width="480" alt="Main view: public IP, location, provider, traffic">
 
@@ -14,7 +14,9 @@ It needs no root rights and nothing extra to install on Kubuntu: it only uses to
 
 **Local IPs.** Every network interface with its type, MAC address, all IPv4 and IPv6 addresses (one per line, with the subnet mask), gateway and DNS servers.
 
-**Traffic bar.** Data received and sent since boot, and the uptime.
+**Traffic bar.** Data received and sent since boot (physical adapters), and the uptime.
+
+**System load.** CPU, memory and swap as bars with their values, green / yellow / red by load, refreshed every 2 seconds.
 
 **Network tools** (the ☰ button):
 

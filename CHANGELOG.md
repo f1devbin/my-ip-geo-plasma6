@@ -2,6 +2,9 @@
 
 All changes of My IP & Geo, newest first.
 
+## v6.1.52
+- CPU, memory and swap below the traffic bar: one bar each with the value (CPU in %, memory and swap as "used / total GB · %"). The bars are green, yellow from 60 % and red from 85 %; a value from 85 % is shown in red too. Read every 2 s from /proc/stat and /proc/meminfo (memory used = total minus available, the way KDE System Monitor counts it). Without swap the row says "no swap".
+
 ## v6.1.51
 - Scanner: networks up to /20 (4096 addresses) can be scanned, e.g. 10.2.48.0/21; before, anything bigger than /22 was refused. The limit came from the kernel's neighbour table (1024 entries by default): in a big network the kernel drops entries older than 5 s, so a device that only answers ARP and was found early could be gone when the table was read once at the end. Now the answered entries are collected every 2 s while the scan runs. A /21 takes about 20 s, a /24 about 10 s; the status line shows how many addresses are scanned. The default stays the /24 around this device; a bigger network is typed into the field.
 - Footer Received / Sent count physical adapters only (Ethernet, Wi-Fi, USB, mobile). Before, all interfaces were added up, so with a VPN every byte was counted twice (tunnel and adapter), and Docker bridges and veth pairs added more. Without any physical adapter (e.g. in a container) all interfaces except lo are counted as before.
