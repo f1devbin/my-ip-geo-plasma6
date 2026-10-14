@@ -4,7 +4,7 @@ A compact KDE Plasma 6 widget for your public IP address and location, your loca
 
 It needs no root rights and nothing extra to install on Kubuntu: it only uses tools that are already there (curl, iproute2, ping, bash, Perl).
 
-**Version 6.1.52** · [Changelog](CHANGELOG.md) · [Download](https://github.com/f1devbin/my-ip-geo-plasma6/releases/latest)
+**Version 6.1.53** · [Changelog](CHANGELOG.md) · [Download](https://github.com/f1devbin/my-ip-geo-plasma6/releases/latest)
 
 <img src="screenshots/main.png" width="480" alt="Main view: public IP, location, provider, traffic">
 
@@ -24,7 +24,7 @@ It needs no root rights and nothing extra to install on Kubuntu: it only uses to
 - **Diagnostics.** Checks the chain connection → router → DNS → internet → websites and names the first broken link in plain words, or shows "Everything works" with latency, jitter and packet loss. Also shows the public IP and Cloudflare location, IPv6, VPN, path MTU and the route to 1.1.1.1 with the latency of each hop, and warns about weak Wi-Fi, packet loss, slow or hijacked DNS, broken IPv6 and sign-in pages (captive portals).
 - **Speed.** Download and upload over 4 parallel streams, ping and jitter, against Cloudflare's speed test servers.
 - **Apps.** Which applications use the network: traffic leaders for the last hour, the last 24 hours or since boot, with the live speed and the connections of each application. Uses the helper of KDE System Monitor.
-- **Monitor.** Watch devices by IP address. They are checked every 30 seconds (ping, or ARP for devices that ignore ping), and a desktop notification appears when a device goes offline or comes back.
+- **Monitor.** Watch devices by IP address. They are checked every 30 seconds (ping, or ARP for devices that ignore ping), and a desktop notification appears when a device goes offline or comes back. "Check now" runs the check at once.
 
 | | |
 |---|---|

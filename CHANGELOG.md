@@ -2,6 +2,9 @@
 
 All changes of My IP & Geo, newest first.
 
+## v6.1.53
+- Monitor: a "Check now" button next to the status line checks all watched devices at once instead of waiting for the next 30-second check. While the check runs the line says "Checking…" and the button is disabled.
+
 ## v6.1.52
 - CPU, memory and swap below the traffic bar: one bar each with the value (CPU in %, memory and swap as "used / total GB · %"). The bars are green, yellow from 60 % and red from 85 %; a value from 85 % is shown in red too. Read every 2 s from /proc/stat and /proc/meminfo (memory used = total minus available, the way KDE System Monitor counts it). Without swap the row says "no swap".
 

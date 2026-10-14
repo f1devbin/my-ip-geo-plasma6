@@ -2843,7 +2843,7 @@ font.pixelSize:13 }
                             spacing: 5
                             Image { source: Qt.resolvedUrl("../images/github.svg"); sourceSize.width: 18; sourceSize.height: 18; Layout.preferredWidth: 18; Layout.preferredHeight: 18 }
                             Text { text: "GitHub"; color: root.themeLink; font.pixelSize: 13; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: Qt.openUrlExternally("https://github.com/f1devbin/my-ip-geo-plasma6") } }
-                            Text { text: "· v6.1.52"; color: root.themeSecondary; font.pixelSize: 10 }
+                            Text { text: "· v6.1.53"; color: root.themeSecondary; font.pixelSize: 10 }
                             Item { Layout.fillWidth: true }
                         }
                     }
@@ -4256,12 +4256,30 @@ font.pixelSize:13 }
                         Layout.fillWidth: true
                         wrapMode: Text.Wrap
                     }
-                    Text {
-                        text: root.watchedDevices.length ? "Status is checked every 30 seconds." : "Add an IP or use Watch from Network Scanner."
-                        color: root.themeSecondary
-                        font.pixelSize: 10
+                    // Status line and "Check now": the 30-second check can be run at once
+                    RowLayout {
                         Layout.fillWidth: true
-                        wrapMode: Text.Wrap
+                        spacing: 6
+                        Text {
+                            text: !root.watchedDevices.length ? "Add an IP or use Watch from Network Scanner."
+                                : (root.monitorLoading ? "Checking…" : "Status is checked every 30 seconds.")
+                            color: root.monitorLoading ? root.themeHighlight : root.themeSecondary
+                            font.pixelSize: 10
+                            Layout.fillWidth: true
+                            wrapMode: Text.Wrap
+                        }
+                        Controls.Button {
+                            visible: root.watchedDevices.length > 0
+                            text: "Check now"
+                            icon.name: "view-refresh"
+                            icon.width: 16
+                            icon.height: 16
+                            enabled: !root.monitorLoading
+                            Controls.ToolTip.visible: hovered
+                            Controls.ToolTip.delay: 500
+                            Controls.ToolTip.text: "Check all devices now"
+                            onClicked: root.monitorWatchedDevices()
+                        }
                     }
                     Flickable {
                         Layout.fillWidth: true
