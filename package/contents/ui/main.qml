@@ -15,11 +15,12 @@ PlasmoidItem {
     Kirigami.Theme.inherit: false
 
     width: 500
-    height: 520
+    height: 640
     Layout.minimumWidth: 400
     // Never smaller than the main view needs: margins 2 x 14, title 30, tabs 34, Public IP card 220,
-    // traffic bar, system bars and 4 x 6 spacing (the system bars used to be pushed out of the widget)
-    Layout.minimumHeight: 28 + 30 + 34 + 220 + trafficBar.Layout.preferredHeight + systemBar.Layout.preferredHeight + 4 * 6
+    // system bars, traffic, drives (grows with the drives), footer and 6 x 6 spacing
+    Layout.minimumHeight: 28 + 30 + 34 + 220 + systemBar.Layout.preferredHeight + trafficBar.Layout.preferredHeight +
+                          drivesBar.Layout.preferredHeight + footerBar.Layout.preferredHeight + 6 * 6
 
     property int tab: 0
     property int toolsTab: 0
@@ -172,6 +173,13 @@ PlasmoidItem {
     property int sysSeq: 0
     property string trafficSent: "—"
     property string trafficUpdated: "—"
+    // Current speed from the difference of two counter samples (bytes/s, -1 = not known yet)
+    property var trafficPrev: null
+    property real trafficRxRate: -1
+    property real trafficTxRate: -1
+    // External drives (drives.sh), polled every 3 s
+    property var drives: []
+    property int drivesSeq: 0
 
     Settings {
         id: appSettings
@@ -2059,6 +2067,70 @@ PlasmoidItem {
                 text: swapTotal > 0 ? root.usageText(swapUsed, swapTotal) : (swapUsed >= 0 ? "no swap" : "—")}
     }
 
+    function formatRate(bytesPerSec) {
+        return bytesPerSec >= 0 ? root.formatBytes(bytesPerSec) + "/s" : "—"
+    }
+
+    // Speed between two samples {rx, tx, t (ms)}. A counter that went back (adapter re-plugged,
+    // reset) or a missing previous sample gives no speed instead of a wrong one.
+    function trafficRate(prev, cur) {
+        if (!prev || !cur) return null
+        var dt = (cur.t - prev.t) / 1000
+        if (!(dt > 0) || cur.rx < prev.rx || cur.tx < prev.tx) return null
+        return {rx: (cur.rx - prev.rx) / dt, tx: (cur.tx - prev.tx) / dt}
+    }
+
+    // lsblk escapes unsafe characters as \xNN (UTF-8 bytes): "My\x20Disk" -> "My Disk"
+    function decodeLsblk(text) {
+        var t = String(text || "")
+        if (t.indexOf("\\x") < 0) return t
+        try {
+            return decodeURIComponent(t.replace(/%/g, "%25").replace(/\\x([0-9a-fA-F]{2})/g, "%$1"))
+        } catch (e) {
+            return t.replace(/\\x([0-9a-fA-F]{2})/g, function(m, h) { return String.fromCharCode(parseInt(h, 16)) })
+        }
+    }
+
+    // drives.sh lines: name size label fstype mountpoint transport model used avail (tab-separated)
+    function parseDrives(text) {
+        var out = []
+        var lines = String(text || "").split("\n")
+        for (var i = 0; i < lines.length; ++i) {
+            var f = lines[i].replace(/\r$/, "").split("\t")
+            if (f.length < 9 || !/^[A-Za-z0-9_.-]+$/.test(f[0])) continue
+            var mount = root.decodeLsblk(f[4])
+            out.push({name: f[0], size: Number(f[1]) || 0, label: root.decodeLsblk(f[2]), fstype: f[3],
+                      mount: mount, mounted: mount !== "", tran: f[5], model: root.decodeLsblk(f[6]).trim(),
+                      used: Number(f[7]), avail: Number(f[8])})
+        }
+        return out
+    }
+
+    // Tooltip of a drive tile
+    function driveDetails(d) {
+        if (!d) return ""
+        var s = [d.name + (d.label ? " · " + d.label : "") + " · " + root.formatBytes(d.size)]
+        if (d.model) s.push(d.model + (d.tran ? " (" + d.tran.toUpperCase() + ")" : ""))
+        if (d.fstype) s.push("Filesystem: " + d.fstype)
+        if (d.mounted) {
+            s.push("Mounted at " + d.mount)
+            if (d.used >= 0 && d.avail >= 0) s.push("Used " + root.formatBytes(d.used) + " · free " + root.formatBytes(d.avail))
+            s.push("Click to open")
+        } else {
+            s.push("Not mounted")
+        }
+        return s.join("\n")
+    }
+
+    function openDrive(d) {
+        if (d && d.mounted) Qt.openUrlExternally("file://" + encodeURI(d.mount))
+    }
+
+    function refreshDrives() {
+        root.drivesSeq += 1
+        drivesApi.connectSource("bash " + root.codePath("drives.sh") + " " + root.drivesSeq)
+    }
+
     function refreshSystem() {
         root.sysSeq += 1
         sysApi.connectSource("MYIPGEO_SEQ=" + root.sysSeq + " sh -c 'head -n 1 /proc/stat; grep -E \"^(MemTotal|MemAvailable|SwapTotal|SwapFree):\" /proc/meminfo'")
@@ -2205,7 +2277,17 @@ PlasmoidItem {
         }
     }
     Timer { interval: 2000; repeat: true; running: true; triggeredOnStart: true; onTriggered: root.refreshSystem() }
-    Plasma5Support.DataSource { id: trafficApi; engine:"executable"; onNewData:function(source,data){trafficApi.disconnectSource(source);var p=String(data.stdout||"").trim().split(/\s+/);if(p.length>=2){root.trafficReceived=root.formatBytes(p[0]);root.trafficSent=root.formatBytes(p[1]);root.trafficUpdated=Qt.formatTime(new Date(),"HH:mm:ss")}} }
+    Plasma5Support.DataSource { id: trafficApi; engine:"executable"; onNewData:function(source,data){trafficApi.disconnectSource(source);var p=String(data.stdout||"").trim().split(/\s+/);if(p.length>=2){root.trafficReceived=root.formatBytes(p[0]);root.trafficSent=root.formatBytes(p[1]);root.trafficUpdated=Qt.formatTime(new Date(),"HH:mm:ss");var cur={rx:Number(p[0]),tx:Number(p[1]),t:Date.now()};var r=root.trafficRate(root.trafficPrev,cur);root.trafficRxRate=r?r.rx:-1;root.trafficTxRate=r?r.tx:-1;root.trafficPrev=cur}} }
+    Plasma5Support.DataSource {
+        id: drivesApi; engine: "executable"
+        onNewData: function(source, data) {
+            drivesApi.disconnectSource(source)
+            var list = root.parseDrives(data.stdout)
+            // Keep the same array while nothing changed, so the tiles are not rebuilt every 3 s
+            if (JSON.stringify(list) !== JSON.stringify(root.drives)) root.drives = list
+        }
+    }
+    Timer { interval: 3000; repeat: true; running: true; triggeredOnStart: true; onTriggered: root.refreshDrives() }
     Plasma5Support.DataSource {
         id: appUsageApi; engine: "executable"
         onNewData: function(source, data) {
@@ -2338,7 +2420,8 @@ PlasmoidItem {
     } }
     Plasma5Support.DataSource { id: monitorNotifyApi; engine:"executable"; onNewData:function(source,data){monitorNotifyApi.disconnectSource(source)} }
 
-    Timer { interval:5000
+    // Every 2 s: the totals and the current speed
+    Timer { interval:2000
  repeat:true
  running:true
  onTriggered:root.refreshTraffic() }
@@ -2778,80 +2861,6 @@ font.pixelSize:13 }
                 }
             }
 
-            Rectangle {
-                id: trafficBar
-                Layout.fillWidth: true
-                Layout.preferredHeight: 52
-                radius: 12
-                color: root.alpha(root.themeText, 0.035)
-                border.width: 1
-                border.color: root.alpha(root.themeText, 0.10)
-
-                RowLayout {
-                    anchors.fill: parent
-                    anchors.leftMargin: 10
-                    anchors.rightMargin: 10
-                    spacing: 8
-
-                    RowLayout {
-                        Layout.fillWidth: true
-                        spacing: 8
-                        Image {
-                            source: Qt.resolvedUrl("../images/arrow-down.svg")
-                            sourceSize.width: 28
-                            sourceSize.height: 34
-                            Layout.preferredWidth: 28
-                            Layout.preferredHeight: 34
-                        }
-                        ColumnLayout {
-                            Layout.fillWidth: true
-                            spacing: 0
-                            Text { text: "Received"; color: root.themeSecondary; font.pixelSize: 9 }
-                            Text { text: root.trafficReceived; color: root.themeText; font.pixelSize: 13; font.bold: true }
-                        }
-                    }
-
-                    Rectangle { Layout.preferredWidth: 1; Layout.preferredHeight: 30; color: root.alpha(root.themeText, 0.12) }
-
-                    RowLayout {
-                        Layout.fillWidth: true
-                        spacing: 8
-                        Image {
-                            source: Qt.resolvedUrl("../images/arrow-up.svg")
-                            sourceSize.width: 28
-                            sourceSize.height: 34
-                            Layout.preferredWidth: 28
-                            Layout.preferredHeight: 34
-                        }
-                        ColumnLayout {
-                            Layout.fillWidth: true
-                            spacing: 0
-                            Text { text: "Sent"; color: root.themeSecondary; font.pixelSize: 9 }
-                            Text { text: root.trafficSent; color: root.themeText; font.pixelSize: 13; font.bold: true }
-                        }
-                    }
-
-                    Rectangle { Layout.preferredWidth: 1; Layout.preferredHeight: 30; color: root.alpha(root.themeText, 0.12) }
-
-                    ColumnLayout {
-                        Layout.preferredWidth: 122
-                        spacing: 1
-                        RowLayout {
-                            spacing: 5
-                            Image { source: Qt.resolvedUrl("../images/clock.svg"); sourceSize.width: 18; sourceSize.height: 18; Layout.preferredWidth: 18; Layout.preferredHeight: 18 }
-                            Text { text: "Uptime: " + root.systemUptime; color: root.themeText; font.pixelSize: 13; Layout.fillWidth: true }
-                        }
-                        RowLayout {
-                            spacing: 5
-                            Image { source: Qt.resolvedUrl("../images/github.svg"); sourceSize.width: 18; sourceSize.height: 18; Layout.preferredWidth: 18; Layout.preferredHeight: 18 }
-                            Text { text: "GitHub"; color: root.themeLink; font.pixelSize: 13; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: Qt.openUrlExternally("https://github.com/f1devbin/my-ip-geo-plasma6") } }
-                            Text { text: "· v6.1.54"; color: root.themeSecondary; font.pixelSize: 10 }
-                            Item { Layout.fillWidth: true }
-                        }
-                    }
-                }
-            }
-
             // CPU, memory and swap: a bar each, coloured by load
             Rectangle {
                 id: systemBar
@@ -2902,6 +2911,194 @@ font.pixelSize:13 }
                             }
                         }
                     }
+                }
+            }
+
+            // Network traffic since boot and the current speed, full width
+            Rectangle {
+                id: trafficBar
+                Layout.fillWidth: true
+                Layout.preferredHeight: 52
+                radius: 12
+                color: root.alpha(root.themeText, 0.035)
+                border.width: 1
+                border.color: root.alpha(root.themeText, 0.10)
+
+                RowLayout {
+                    anchors.fill: parent
+                    anchors.leftMargin: 10
+                    anchors.rightMargin: 12
+                    spacing: 8
+
+                    Repeater {
+                        model: 2
+                        delegate: RowLayout {
+                            readonly property bool down: index === 0
+                            Layout.fillWidth: true
+                            Layout.preferredWidth: 1
+                            spacing: 8
+                            Rectangle {
+                                visible: !down
+                                Layout.preferredWidth: 1
+                                Layout.preferredHeight: 30
+                                color: root.alpha(root.themeText, 0.12)
+                            }
+                            Image {
+                                source: Qt.resolvedUrl(down ? "../images/arrow-down.svg" : "../images/arrow-up.svg")
+                                sourceSize.width: 28
+                                sourceSize.height: 34
+                                Layout.preferredWidth: 28
+                                Layout.preferredHeight: 34
+                            }
+                            ColumnLayout {
+                                spacing: 0
+                                Text { text: down ? "Received" : "Sent"; color: root.themeText; opacity: 0.8; font.pixelSize: 10 }
+                                Text { text: down ? root.trafficReceived : root.trafficSent; color: root.themeText; font.pixelSize: 13; font.bold: true }
+                            }
+                            Item { Layout.fillWidth: true }
+                            ColumnLayout {
+                                spacing: 0
+                                Text { Layout.alignment: Qt.AlignRight; text: "Now"; color: root.themeText; opacity: 0.8; font.pixelSize: 10 }
+                                Text {
+                                    Layout.alignment: Qt.AlignRight
+                                    text: root.formatRate(down ? root.trafficRxRate : root.trafficTxRate)
+                                    color: root.themeText
+                                    font.pixelSize: 13
+                                    font.bold: true
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // External drives: an icon per volume with its name and size; a mounted one opens on click
+            Rectangle {
+                id: drivesBar
+                Layout.fillWidth: true
+                Layout.preferredHeight: drivesCol.implicitHeight + 16
+                radius: 12
+                color: root.alpha(root.themeText, 0.035)
+                border.width: 1
+                border.color: root.alpha(root.themeText, 0.10)
+
+                ColumnLayout {
+                    id: drivesCol
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.top: parent.top
+                    anchors.margins: 8
+                    anchors.leftMargin: 12
+                    anchors.rightMargin: 12
+                    spacing: 6
+
+                    Text {
+                        text: root.drives.length ? "External drives" : "External drives: none connected"
+                        color: root.themeText
+                        font.pixelSize: 11
+                        font.bold: true
+                    }
+
+                    Flow {
+                        id: drivesFlow
+                        visible: root.drives.length > 0
+                        Layout.fillWidth: true
+                        spacing: 6
+
+                        Repeater {
+                            model: root.drives
+                            delegate: Rectangle {
+                                id: driveTile
+                                readonly property var d: modelData
+                                // two tiles per row at any widget width
+                                width: Math.floor((drivesFlow.width - drivesFlow.spacing) / 2)
+                                height: 46
+                                radius: 8
+                                color: driveMouse.containsMouse && d.mounted ? root.alpha(root.themeText, 0.10) : root.alpha(root.themeText, 0.05)
+                                border.width: 1
+                                border.color: d.mounted ? root.alpha(root.themePositive, 0.55) : root.alpha(root.themeText, 0.14)
+
+                                Kirigami.Icon {
+                                    id: driveIcon
+                                    anchors.left: parent.left
+                                    anchors.leftMargin: 6
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    width: 28
+                                    height: 28
+                                    source: driveTile.d.tran === "usb" ? "drive-removable-media-usb" : "drive-removable-media"
+                                    opacity: driveTile.d.mounted ? 1 : 0.55
+                                }
+                                Rectangle {
+                                    // mount state dot on the icon
+                                    anchors.right: driveIcon.right
+                                    anchors.bottom: driveIcon.bottom
+                                    width: 9
+                                    height: 9
+                                    radius: 4.5
+                                    color: driveTile.d.mounted ? root.themePositive : root.alpha(root.themeText, 0.45)
+                                    border.width: 1
+                                    border.color: root.themeBackground
+                                }
+                                Column {
+                                    anchors.left: driveIcon.right
+                                    anchors.leftMargin: 6
+                                    anchors.right: parent.right
+                                    anchors.rightMargin: 6
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    spacing: 1
+                                    Text {
+                                        width: parent.width
+                                        text: driveTile.d.name + (driveTile.d.label ? " · " + driveTile.d.label : "")
+                                        color: root.themeText
+                                        font.pixelSize: 12
+                                        font.bold: true
+                                        elide: Text.ElideRight
+                                    }
+                                    Text {
+                                        width: parent.width
+                                        text: root.formatBytes(driveTile.d.size) + " · " + (driveTile.d.mounted ? "Mounted" : "Not mounted")
+                                        color: driveTile.d.mounted ? root.themePositive : root.themeText
+                                        font.pixelSize: 11
+                                        elide: Text.ElideRight
+                                    }
+                                }
+                                MouseArea {
+                                    id: driveMouse
+                                    anchors.fill: parent
+                                    hoverEnabled: true
+                                    cursorShape: driveTile.d.mounted ? Qt.PointingHandCursor : Qt.ArrowCursor
+                                    onClicked: root.openDrive(driveTile.d)
+                                }
+                                Controls.ToolTip.visible: driveMouse.containsMouse
+                                Controls.ToolTip.delay: 400
+                                Controls.ToolTip.text: root.driveDetails(driveTile.d)
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Uptime and the project link in one line
+            Rectangle {
+                id: footerBar
+                Layout.fillWidth: true
+                Layout.preferredHeight: 32
+                radius: 12
+                color: root.alpha(root.themeText, 0.035)
+                border.width: 1
+                border.color: root.alpha(root.themeText, 0.10)
+
+                RowLayout {
+                    anchors.fill: parent
+                    anchors.leftMargin: 12
+                    anchors.rightMargin: 12
+                    spacing: 6
+                    Image { source: Qt.resolvedUrl("../images/clock.svg"); sourceSize.width: 18; sourceSize.height: 18; Layout.preferredWidth: 18; Layout.preferredHeight: 18 }
+                    Text { text: "Uptime: " + root.systemUptime; color: root.themeText; font.pixelSize: 13 }
+                    Item { Layout.fillWidth: true }
+                    Image { source: Qt.resolvedUrl("../images/github.svg"); sourceSize.width: 18; sourceSize.height: 18; Layout.preferredWidth: 18; Layout.preferredHeight: 18 }
+                    Text { text: "GitHub"; color: root.themeLink; font.pixelSize: 13; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: Qt.openUrlExternally("https://github.com/f1devbin/my-ip-geo-plasma6") } }
+                    Text { text: "· v6.1.55"; color: root.themeText; opacity: 0.8; font.pixelSize: 11 }
                 }
             }
         }

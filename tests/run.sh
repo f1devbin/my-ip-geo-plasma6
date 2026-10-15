@@ -21,4 +21,9 @@ if out=$(bash test_v50.sh ../package/contents/code/netdiag.sh 2>&1); then
 else
     printf 'FAIL  test_v50.sh\n'; printf '%s\n' "$out" | tail -n 25; fail=1
 fi
+if out=$(bash test_v55.sh ../package/contents/code/drives.sh 2>&1); then
+    printf 'ok    %-22s %s passed\n' test_v55.sh "$(printf '%s\n' "$out" | grep -c '^ok')"
+else
+    printf 'FAIL  test_v55.sh\n'; printf '%s\n' "$out" | tail -n 25; fail=1
+fi
 exit $fail

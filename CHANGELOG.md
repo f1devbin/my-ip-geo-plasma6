@@ -2,6 +2,13 @@
 
 All changes of My IP & Geo, newest first.
 
+## v6.1.55
+- Main view, top to bottom: CPU / memory / swap, traffic, external drives, then uptime and GitHub. The system bars now sit above the traffic bar.
+- Traffic uses the full width: received and sent since boot plus the current speed ("Now", e.g. 1.2 MB/s), from the same physical adapters. Counters are read every 2 s (was 5 s); after a counter reset the speed shows "—" for one sample instead of a wrong value.
+- New External drives block: one tile per volume of a USB, removable or hot-plug disk (partitions, or the whole disk without a partition table) with icon, kernel name and label (sdb1 · KINGSTON), size and mount state (green dot and "Mounted", or "Not mounted"). Clicking a mounted tile opens it in the file manager; the tooltip shows model, filesystem, mount point, used and free space. Internal SATA/NVMe disks, loop devices, empty card readers and the disk the system runs from are not listed; an opened LUKS volume shows its mapping's mount point. Read every 3 s with `lsblk` and `df` (`contents/code/drives.sh`), no root needed.
+- Uptime and GitHub moved to their own line at the bottom.
+- The minimum height includes the new blocks and grows with the number of drive rows; new widgets start 640 px high.
+
 ## v6.1.54
 - The widget cannot be made smaller than the main view needs: its minimum height now counts the traffic bar and the CPU / memory / swap bars, which were pushed out of the bottom edge of a widget that was sized for the view before 6.1.52. A widget that is too low grows to the minimum; new widgets start 520 px high.
 
