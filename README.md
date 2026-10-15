@@ -4,9 +4,9 @@ A compact KDE Plasma 6 widget for your public IP address and location, your loca
 
 It needs no root rights and nothing extra to install on Kubuntu: it only uses tools that are already there (curl, iproute2, ping, bash, Perl).
 
-**Version 6.1.58** · [Changelog](CHANGELOG.md) · [Download](https://github.com/f1devbin/my-ip-geo-plasma6/releases/latest)
+**Version 6.1.59** · [Changelog](CHANGELOG.md) · [Download](https://github.com/f1devbin/my-ip-geo-plasma6/releases/latest)
 
-<img src="screenshots/main.png" width="419" alt="Main view: public IP, location, provider, CPU / memory / swap, traffic, external drives">
+<img src="screenshots/main.png" width="416" alt="Main view: public IP, location, provider, CPU / memory / swap, traffic, external drives">
 
 ## Features
 
@@ -14,9 +14,15 @@ It needs no root rights and nothing extra to install on Kubuntu: it only uses to
 
 **Local IPs.** Every network interface with its type, MAC address, all IPv4 and IPv6 addresses (one per line, with the subnet mask), gateway and DNS servers.
 
-**Traffic bar.** Data received and sent since boot (physical adapters), and the uptime.
-
 **System load.** CPU, memory and swap as bars with their values, green / yellow / red by load, refreshed every 2 seconds.
+
+**Traffic.** Data received and sent since boot and the current speed of each (physical adapters), refreshed every 2 seconds.
+
+**External drives.** Every partition of a USB or removable drive as a tile: name and label (sdb1 · KINGSTON), size and whether it is mounted. A click on a mounted drive opens it in the file manager; the tooltip shows the model, filesystem, mount point and free space. The system disk and internal disks are not listed.
+
+**Settings** (the ⚙ button). Show or hide the system load, traffic and drives blocks. The widget height follows the shown blocks and the number of drives.
+
+**Footer.** Uptime and a link to this repository.
 
 **Network tools** (the ☰ button):
 
@@ -33,7 +39,7 @@ It needs no root rights and nothing extra to install on Kubuntu: it only uses to
 | <img src="screenshots/speed.png" width="400" alt="Speed test"> | <img src="screenshots/apps.png" width="400" alt="Traffic per application"> |
 | <img src="screenshots/monitor.png" width="400" alt="Monitor"> | |
 
-The screenshots were taken on a test network; all addresses in them are documentation examples.
+The main screenshot shows the address of a VPN exit server. The other screenshots were taken on a test network; all addresses in them are documentation examples.
 
 ## Requirements
 

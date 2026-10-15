@@ -178,6 +178,8 @@ PlasmoidItem {
     property real swapUsed: -1
     property real swapTotal: 0
     property int sysSeq: 0
+    property int publicSeq: 0
+    property int dnsSeq: 0
     property string trafficSent: "—"
     property string trafficUpdated: "—"
     // Current speed from the difference of two counter samples (bytes/s, -1 = not known yet)
@@ -576,7 +578,7 @@ PlasmoidItem {
         scanRunCidr = cidr
         // A new command string every run: the same string again can return the previous result
         scanSeq += 1
-        scanApi.connectSource("sh " + codePath("netscan.sh") + " scan " + cidr + " " + scanSeq)
+        scanApi.connectSource("sh " + codePath("netscan.sh") + " scan " + cidr + " " + root.runTag(scanSeq))
     }
 
     // ----- Scanner: per-host TCP port check (portscan.sh) -----
@@ -628,7 +630,7 @@ PlasmoidItem {
         root.portScanIp = ip
         root.portScanSeq += 1
         root.setPortScan(ip, {state: "running", ports: [], scanned: 0, error: "", secs: 0})
-        root.portScanSource = "bash " + root.codePath("portscan.sh") + " " + safeIp + " " + spec + " " + root.portScanSeq
+        root.portScanSource = "bash " + root.codePath("portscan.sh") + " " + safeIp + " " + spec + " " + root.runTag(root.portScanSeq)
         portScanApi.connectSource(root.portScanSource)
         portScanWatchdog.restart()
     }
@@ -724,7 +726,7 @@ PlasmoidItem {
         }
         if (!ips.length) { monitorLoading = false; return }
         root.monitorSeq += 1
-        monitorApi.connectSource("MYIPGEO_RUN=" + root.monitorSeq + " sh " + codePath("monitor.sh") + " " + ips.join(" "))
+        monitorApi.connectSource("MYIPGEO_RUN=" + root.runTag(root.monitorSeq) + " sh " + codePath("monitor.sh") + " " + ips.join(" "))
     }
 
     function refreshAll() {
@@ -732,13 +734,15 @@ PlasmoidItem {
         uptimeApi.connectSource("cut -d' ' -f1 /proc/uptime")
         if (!loading) {
             loading = true
-            publicApi.connectSource("sh " + codePath("publicip.sh") + " " + Date.now())
+            root.publicSeq += 1
+            publicApi.connectSource("sh " + codePath("publicip.sh") + " " + root.runTag(root.publicSeq))
         }
         if (!localLoading) {
             localLoading = true
             localApi.connectSource("ip -j addr show")
             routeApi.connectSource("ip -j route show default")
-            dnsApi.connectSource("bash " + codePath("netdiag.sh") + " dnsmap " + Date.now())
+            root.dnsSeq += 1
+            dnsApi.connectSource("bash " + codePath("netdiag.sh") + " dnsmap " + root.runTag(root.dnsSeq))
         }
         refreshNetwork()
     }
@@ -764,7 +768,7 @@ PlasmoidItem {
         if (networkLoading) return
         networkLoading = true
         root.statusSeq += 1
-        statusApi.connectSource("bash " + codePath("netdiag.sh") + " status " + root.statusSeq)
+        statusApi.connectSource("bash " + codePath("netdiag.sh") + " status " + root.runTag(root.statusSeq))
     }
 
     // ---------- Diagnostics ----------
@@ -780,7 +784,7 @@ PlasmoidItem {
         root.diagPending = pending
         root.diag = ({})
         for (var j = 0; j < root.diagChecks.length; ++j)
-            diagApi.connectSource("bash " + codePath("netdiag.sh") + " " + root.diagChecks[j] + " " + root.diagSeq)
+            diagApi.connectSource("bash " + codePath("netdiag.sh") + " " + root.diagChecks[j] + " " + root.runTag(root.diagSeq))
         diagWatchdog.restart()
         root.refreshNetwork()
     }
@@ -1612,7 +1616,7 @@ PlasmoidItem {
         // A new command string every time: re-connecting the same source right after it finished
         // makes the executable engine hand back the previous result instead of running it again
         root.appUsageSeq += 1
-        appUsageApi.connectSource("sh " + root.codePath("appusage.sh") + " " + root.appUsageChunkSecs + " " + root.appUsageSeq)
+        appUsageApi.connectSource("sh " + root.codePath("appusage.sh") + " " + root.appUsageChunkSecs + " " + root.runTag(root.appUsageSeq))
     }
 
     function loadAppUsage(bootId) {
@@ -1895,7 +1899,7 @@ PlasmoidItem {
         speedPhase = phase
         speedStatus = phase === "ping" ? "Measuring ping…" : (phase === "download" ? "Measuring download…" : "Measuring upload…")
         root.speedRunSeq += 1
-        var cmd = "sh " + codePath("speedtest.sh") + " " + (phase === "download" ? "down" : (phase === "upload" ? "up" : "ping")) + " " + root.speedRunSeq
+        var cmd = "sh " + codePath("speedtest.sh") + " " + (phase === "download" ? "down" : (phase === "upload" ? "up" : "ping")) + " " + root.runTag(root.speedRunSeq)
         Qt.callLater(function() { speedApi.connectSource(cmd) })
     }
 
@@ -2078,6 +2082,15 @@ PlasmoidItem {
                 text: swapTotal > 0 ? root.usageText(swapUsed, swapTotal) : (swapUsed >= 0 ? "no swap" : "—")}
     }
 
+    // Run tag in a command string. Plasma5Support's DataSource keeps an entry in its "data" map for
+    // every command string it ever ran and copies that map on each update: a counter in the string
+    // (one new string every 2 s) made plasmashell's memory and CPU grow for as long as it ran
+    // (measured: 4500 entries after 2250 runs). Eight tags in rotation keep runs apart while a
+    // previous one may still be finishing, and the map stays small.
+    function runTag(n) {
+        return ((n % 8) + 8) % 8
+    }
+
     function formatRate(bytesPerSec) {
         return bytesPerSec >= 0 ? root.formatBytes(bytesPerSec) + "/s" : "—"
     }
@@ -2140,7 +2153,7 @@ PlasmoidItem {
     function refreshDrives() {
         if (drivesApi.connectedSources.length) return   // the previous run has not finished
         root.drivesSeq += 1
-        drivesApi.connectSource("bash " + root.codePath("drives.sh") + " " + root.drivesSeq)
+        drivesApi.connectSource("bash " + root.codePath("drives.sh") + " " + root.runTag(root.drivesSeq))
     }
 
     // On the desktop the widget sits in an applet container (its "applet" is this item): give the
@@ -2190,7 +2203,7 @@ PlasmoidItem {
     function refreshSystem() {
         if (sysApi.connectedSources.length) return
         root.sysSeq += 1
-        sysApi.connectSource("MYIPGEO_SEQ=" + root.sysSeq + " sh -c 'head -n 1 /proc/stat; grep -E \"^(MemTotal|MemAvailable|SwapTotal|SwapFree):\" /proc/meminfo'")
+        sysApi.connectSource("MYIPGEO_SEQ=" + root.runTag(root.sysSeq) + " sh -c 'head -n 1 /proc/stat; grep -E \"^(MemTotal|MemAvailable|SwapTotal|SwapFree):\" /proc/meminfo'")
     }
 
     function refreshTraffic() {
@@ -2198,7 +2211,7 @@ PlasmoidItem {
         // the same bytes a second time. Without any, every interface but lo.
         if (trafficApi.connectedSources.length) return
         root.trafficSeq += 1
-        trafficApi.connectSource("MYIPGEO_SEQ=" + root.trafficSeq + " sh -c 'rx=0; tx=0; n=0; for d in /sys/class/net/*; do [ -e \"$d/device\" ] || continue; read r < \"$d/statistics/rx_bytes\" && read t < \"$d/statistics/tx_bytes\" || continue; rx=$((rx + r)); tx=$((tx + t)); n=$((n + 1)); done; [ $n -gt 0 ] || for d in /sys/class/net/*; do [ \"${d##*/}\" = lo ] && continue; read r < \"$d/statistics/rx_bytes\" && read t < \"$d/statistics/tx_bytes\" || continue; rx=$((rx + r)); tx=$((tx + t)); done; echo \"$rx $tx\"'")
+        trafficApi.connectSource("MYIPGEO_SEQ=" + root.runTag(root.trafficSeq) + " sh -c 'rx=0; tx=0; n=0; for d in /sys/class/net/*; do [ -e \"$d/device\" ] || continue; read r < \"$d/statistics/rx_bytes\" && read t < \"$d/statistics/tx_bytes\" || continue; rx=$((rx + r)); tx=$((tx + t)); n=$((n + 1)); done; [ $n -gt 0 ] || for d in /sys/class/net/*; do [ \"${d##*/}\" = lo ] && continue; read r < \"$d/statistics/rx_bytes\" && read t < \"$d/statistics/tx_bytes\" || continue; rx=$((rx + r)); tx=$((tx + t)); done; echo \"$rx $tx\"'")
     }
 
     Plasma5Support.DataSource {
@@ -2274,7 +2287,7 @@ PlasmoidItem {
         onNewData: function(source, data) {
             diagApi.disconnectSource(source)
             var m = String(source).match(/netdiag\.sh' (\w+) (\d+)$/)
-            if (!m || +m[2] !== root.diagSeq || !root.diagRunning) return
+            if (!m || +m[2] !== root.runTag(root.diagSeq) || !root.diagRunning) return
             root.diagResult(m[1], data.stdout)
         }
     }
@@ -2284,7 +2297,7 @@ PlasmoidItem {
         interval: 25000
         onTriggered: {
             for (var k in root.diagPending)
-                if (root.diagPending.hasOwnProperty(k)) diagApi.disconnectSource("bash " + root.codePath("netdiag.sh") + " " + k + " " + root.diagSeq)
+                if (root.diagPending.hasOwnProperty(k)) diagApi.disconnectSource("bash " + root.codePath("netdiag.sh") + " " + k + " " + root.runTag(root.diagSeq))
             root.finishDiagnostics()
         }
     }
@@ -2320,7 +2333,7 @@ PlasmoidItem {
         running: root.speedPhase === "download" || root.speedPhase === "upload"
         onTriggered: {
             root.speedSampleSeq += 1
-            speedSampleApi.connectSource("MYIPGEO_SEQ=" + root.speedSampleSeq + " cat /proc/net/dev")
+            speedSampleApi.connectSource("MYIPGEO_SEQ=" + root.runTag(root.speedSampleSeq) + " cat /proc/net/dev")
         }
     }
     Plasma5Support.DataSource {
@@ -3167,7 +3180,7 @@ font.pixelSize:13 }
                     Item { Layout.fillWidth: true }
                     Image { source: Qt.resolvedUrl("../images/github.svg"); sourceSize.width: 18; sourceSize.height: 18; Layout.preferredWidth: 18; Layout.preferredHeight: 18 }
                     Text { text: "GitHub"; color: root.themeLink; font.pixelSize: 13; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: Qt.openUrlExternally("https://github.com/f1devbin/my-ip-geo-plasma6") } }
-                    Text { text: "· v6.1.58"; color: root.themeText; opacity: 0.8; font.pixelSize: 11 }
+                    Text { text: "· v6.1.59"; color: root.themeText; opacity: 0.8; font.pixelSize: 11 }
                 }
             }
         }

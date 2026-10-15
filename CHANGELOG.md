@@ -2,6 +2,9 @@
 
 All changes of My IP & Geo, newest first.
 
+## v6.1.59
+- Fixed a slow leak that made plasmashell use more memory and CPU the longer it ran (measured on Kubuntu: 480 MB and 11% CPU after start, 868 MB and over 50% after an hour). Plasma's executable data source keeps an entry for every command string it has run and copies that list on every update; the widget put a new counter into each command (every 2 s for CPU/memory and traffic, 3 s for drives), so the list grew without end. Commands now carry one of 8 rotating run tags: the list stays at a fixed size (checked in the test environment: 6.1.58 grew by about 2.6 entries a second, 6.1.59 stays constant).
+
 ## v6.1.58
 - Whole project checked for leaks of the kind fixed in 6.1.57 and for processes piling up.
 - A command that hangs no longer blocks a feature for good or spawns new processes behind it: every 10 s, commands still running past their limit are stopped (CPU / memory 10 s, traffic 10 s, drives 20 s, local addresses and DNS 30 s, public IP 60 s, internet status 60 s, Monitor 90 s, Apps 30 s) and their "loading" state is cleared. The 2–3 s pollers start a new run only after the previous one finished.
