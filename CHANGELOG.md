@@ -2,6 +2,9 @@
 
 All changes of My IP & Geo, newest first.
 
+## v6.1.57
+- Fixed high CPU load: the animated CPU / memory / swap bars (since 6.1.52) kept plasmashell's main thread busy, measured at a full core on Kubuntu with the bars shown and about 1.5% with them hidden. The bars now change without animation; with them shown the widget costs about 1% CPU in the test environment (was 20%).
+
 ## v6.1.56
 - Settings button (gear) in the header between the tools menu and Refresh. Settings has checkboxes to show or hide the main view blocks: System load (CPU, memory, swap), Traffic and External drives. The choice is saved; hidden blocks stop polling.
 - The widget height follows the content: it grows and shrinks with the shown blocks and with the number of connected drives (a new row of drive tiles adds its height, an unplugged drive gives it back). On the desktop the widget sets this height itself (a height dragged by hand is reset at the next change); the width stays free. Hidden blocks make the widget lower, so the Network tools and Settings panels get less room.

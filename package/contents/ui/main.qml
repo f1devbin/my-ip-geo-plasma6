@@ -2912,7 +2912,7 @@ font.pixelSize:13 }
                     spacing: 6
 
                     Repeater {
-                        // A fixed model: the rows stay, only their values change (the bars animate)
+                        // A fixed model: the rows stay, only their values change
                         model: 3
                         delegate: RowLayout {
                             readonly property var row: root.sysRow(index, root.cpuPct, root.memUsed, root.memTotal, root.swapUsed, root.swapTotal)
@@ -2928,9 +2928,9 @@ font.pixelSize:13 }
                                     width: parent.width * Math.max(0, Math.min(1, row.pct / 100))
                                     height: parent.height
                                     radius: 4
+                                    // No width/colour animation: three animations every 2 s kept plasmashell's
+                                    // main thread busy (a full core on a real desktop, measured in 6.1.56)
                                     color: root.loadColor(row.pct)
-                                    Behavior on width { NumberAnimation { duration: 400; easing.type: Easing.OutCubic } }
-                                    Behavior on color { ColorAnimation { duration: 400 } }
                                 }
                             }
                             Text {
@@ -3131,7 +3131,7 @@ font.pixelSize:13 }
                     Item { Layout.fillWidth: true }
                     Image { source: Qt.resolvedUrl("../images/github.svg"); sourceSize.width: 18; sourceSize.height: 18; Layout.preferredWidth: 18; Layout.preferredHeight: 18 }
                     Text { text: "GitHub"; color: root.themeLink; font.pixelSize: 13; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: Qt.openUrlExternally("https://github.com/f1devbin/my-ip-geo-plasma6") } }
-                    Text { text: "· v6.1.56"; color: root.themeText; opacity: 0.8; font.pixelSize: 11 }
+                    Text { text: "· v6.1.57"; color: root.themeText; opacity: 0.8; font.pixelSize: 11 }
                 }
             }
         }
