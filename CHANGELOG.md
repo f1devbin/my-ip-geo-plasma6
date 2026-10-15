@@ -2,6 +2,10 @@
 
 All changes of My IP & Geo, newest first.
 
+## v6.1.56
+- Settings button (gear) in the header between the tools menu and Refresh. Settings has checkboxes to show or hide the main view blocks: System load (CPU, memory, swap), Traffic and External drives. The choice is saved; hidden blocks stop polling.
+- The widget height follows the content: it grows and shrinks with the shown blocks and with the number of connected drives (a new row of drive tiles adds its height, an unplugged drive gives it back). On the desktop the widget sets this height itself (a height dragged by hand is reset at the next change); the width stays free. Hidden blocks make the widget lower, so the Network tools and Settings panels get less room.
+
 ## v6.1.55
 - Main view, top to bottom: CPU / memory / swap, traffic, external drives, then uptime and GitHub. The system bars now sit above the traffic bar.
 - Traffic uses the full width: received and sent since boot plus the current speed ("Now", e.g. 1.2 MB/s), from the same physical adapters. Counters are read every 2 s (was 5 s); after a counter reset the speed shows "—" for one sample instead of a wrong value.

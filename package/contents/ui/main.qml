@@ -15,12 +15,19 @@ PlasmoidItem {
     Kirigami.Theme.inherit: false
 
     width: 500
-    height: 640
+    // The height follows the content: margins 2 x 14, title 30, tabs 34, Public IP card 220, footer,
+    // 3 x 6 spacing, plus each block shown in Settings with its 6 spacing. The drives block grows and
+    // shrinks with the connected drives. The desktop only grows a widget to its minimum height, so
+    // fitDesktopHeight() also sets the height of the desktop's container (it shrinks it too).
+    readonly property int contentHeight: 28 + 30 + 34 + 220 + footerBar.Layout.preferredHeight + 3 * 6 +
+        (appSettings.showSystem ? systemBar.Layout.preferredHeight + 6 : 0) +
+        (appSettings.showTraffic ? trafficBar.Layout.preferredHeight + 6 : 0) +
+        (appSettings.showDrives ? drivesBar.Layout.preferredHeight + 6 : 0)
+    height: contentHeight
     Layout.minimumWidth: 400
-    // Never smaller than the main view needs: margins 2 x 14, title 30, tabs 34, Public IP card 220,
-    // system bars, traffic, drives (grows with the drives), footer and 6 x 6 spacing
-    Layout.minimumHeight: 28 + 30 + 34 + 220 + systemBar.Layout.preferredHeight + trafficBar.Layout.preferredHeight +
-                          drivesBar.Layout.preferredHeight + footerBar.Layout.preferredHeight + 6 * 6
+    Layout.minimumHeight: contentHeight
+    Layout.preferredHeight: contentHeight
+    onContentHeightChanged: Qt.callLater(root.fitDesktopHeight)
 
     property int tab: 0
     property int toolsTab: 0
@@ -186,6 +193,10 @@ PlasmoidItem {
         property string watchedDevicesJson: "[]"
         property string appUsageJson: ""
         property string appPeriod: "day"
+        // Blocks of the main view (Settings)
+        property bool showSystem: true
+        property bool showTraffic: true
+        property bool showDrives: true
     }
 
     Plasmoid.icon: "/icon.png"
@@ -2131,6 +2142,18 @@ PlasmoidItem {
         drivesApi.connectSource("bash " + root.codePath("drives.sh") + " " + root.drivesSeq)
     }
 
+    // On the desktop the widget sits in an applet container (its "applet" is this item): give the
+    // container the content height plus its padding. In a panel popup there is none, nothing happens.
+    function fitDesktopHeight() {
+        for (var p = root.parent; p; p = p.parent) {
+            if (p.applet === root) {
+                var h = root.contentHeight + (p.topPadding || 0) + (p.bottomPadding || 0)
+                if (Math.abs(p.height - h) >= 1) p.height = h
+                return
+            }
+        }
+    }
+
     function refreshSystem() {
         root.sysSeq += 1
         sysApi.connectSource("MYIPGEO_SEQ=" + root.sysSeq + " sh -c 'head -n 1 /proc/stat; grep -E \"^(MemTotal|MemAvailable|SwapTotal|SwapFree):\" /proc/meminfo'")
@@ -2276,7 +2299,7 @@ PlasmoidItem {
             if (r.swapUsed >= 0) { root.swapTotal = r.swapTotal; root.swapUsed = r.swapUsed }
         }
     }
-    Timer { interval: 2000; repeat: true; running: true; triggeredOnStart: true; onTriggered: root.refreshSystem() }
+    Timer { interval: 2000; repeat: true; running: appSettings.showSystem; triggeredOnStart: true; onTriggered: root.refreshSystem() }
     Plasma5Support.DataSource { id: trafficApi; engine:"executable"; onNewData:function(source,data){trafficApi.disconnectSource(source);var p=String(data.stdout||"").trim().split(/\s+/);if(p.length>=2){root.trafficReceived=root.formatBytes(p[0]);root.trafficSent=root.formatBytes(p[1]);root.trafficUpdated=Qt.formatTime(new Date(),"HH:mm:ss");var cur={rx:Number(p[0]),tx:Number(p[1]),t:Date.now()};var r=root.trafficRate(root.trafficPrev,cur);root.trafficRxRate=r?r.rx:-1;root.trafficTxRate=r?r.tx:-1;root.trafficPrev=cur}} }
     Plasma5Support.DataSource {
         id: drivesApi; engine: "executable"
@@ -2287,7 +2310,13 @@ PlasmoidItem {
             if (JSON.stringify(list) !== JSON.stringify(root.drives)) root.drives = list
         }
     }
-    Timer { interval: 3000; repeat: true; running: true; triggeredOnStart: true; onTriggered: root.refreshDrives() }
+    Timer { interval: 3000; repeat: true; running: appSettings.showDrives; triggeredOnStart: true; onTriggered: root.refreshDrives() }
+    // A block shown again starts from a new sample: no CPU load or speed averaged over the hidden time
+    Connections {
+        target: appSettings
+        function onShowSystemChanged() { root.cpuPrev = null; root.cpuPct = -1 }
+        function onShowTrafficChanged() { root.trafficPrev = null; root.trafficRxRate = -1; root.trafficTxRate = -1 }
+    }
     Plasma5Support.DataSource {
         id: appUsageApi; engine: "executable"
         onNewData: function(source, data) {
@@ -2423,7 +2452,8 @@ PlasmoidItem {
     // Every 2 s: the totals and the current speed
     Timer { interval:2000
  repeat:true
- running:true
+ running:appSettings.showTraffic
+ triggeredOnStart:true
  onTriggered:root.refreshTraffic() }
     // Apps: refreshed on open, by its Refresh button and every 10 min while visible (no fast polling)
     Timer { interval:600000
@@ -2442,7 +2472,7 @@ PlasmoidItem {
  repeat:true
  running:true
  onTriggered:{ root.refreshNetwork(); root.monitorWatchedDevices() } }
-    Component.onCompleted: { bootIdApi.connectSource("cat /proc/sys/kernel/random/boot_id"); root.loadWatchedDevices(); root.refreshAll(); root.refreshTraffic(); root.refreshAppTraffic(); root.checkDependencies(); root.monitorWatchedDevices() }
+    Component.onCompleted: { bootIdApi.connectSource("cat /proc/sys/kernel/random/boot_id"); root.loadWatchedDevices(); root.refreshAll(); root.refreshTraffic(); root.refreshAppTraffic(); root.checkDependencies(); root.monitorWatchedDevices(); Qt.callLater(root.fitDesktopHeight) }
 
     compactRepresentation: Item {
         implicitWidth: 180
@@ -2864,6 +2894,7 @@ font.pixelSize:13 }
             // CPU, memory and swap: a bar each, coloured by load
             Rectangle {
                 id: systemBar
+                visible: appSettings.showSystem
                 Layout.fillWidth: true
                 Layout.preferredHeight: systemRows.implicitHeight + 16
                 radius: 12
@@ -2917,6 +2948,7 @@ font.pixelSize:13 }
             // Network traffic since boot and the current speed, full width
             Rectangle {
                 id: trafficBar
+                visible: appSettings.showTraffic
                 Layout.fillWidth: true
                 Layout.preferredHeight: 52
                 radius: 12
@@ -2975,6 +3007,7 @@ font.pixelSize:13 }
             // External drives: an icon per volume with its name and size; a mounted one opens on click
             Rectangle {
                 id: drivesBar
+                visible: appSettings.showDrives
                 Layout.fillWidth: true
                 Layout.preferredHeight: drivesCol.implicitHeight + 16
                 radius: 12
@@ -3098,7 +3131,7 @@ font.pixelSize:13 }
                     Item { Layout.fillWidth: true }
                     Image { source: Qt.resolvedUrl("../images/github.svg"); sourceSize.width: 18; sourceSize.height: 18; Layout.preferredWidth: 18; Layout.preferredHeight: 18 }
                     Text { text: "GitHub"; color: root.themeLink; font.pixelSize: 13; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: Qt.openUrlExternally("https://github.com/f1devbin/my-ip-geo-plasma6") } }
-                    Text { text: "· v6.1.55"; color: root.themeText; opacity: 0.8; font.pixelSize: 11 }
+                    Text { text: "· v6.1.56"; color: root.themeText; opacity: 0.8; font.pixelSize: 11 }
                 }
             }
         }
@@ -3171,7 +3204,7 @@ font.pixelSize:13 }
             id: toolsMenuButton
             width:30
             height:30
-            onClicked: featurePanel.visible = true
+            onClicked: { settingsPanel.visible = false; featurePanel.visible = true }
             background: Rectangle {
                 radius:5
                 color: toolsMenuButton.down ? root.alpha(root.themeHighlight, .20)
@@ -3185,6 +3218,57 @@ font.pixelSize:13 }
                 Rectangle { width:14; height:1; radius:1; color:root.themeText; anchors.horizontalCenter:parent.horizontalCenter; anchors.verticalCenter:parent.verticalCenter; anchors.verticalCenterOffset:-5 }
                 Rectangle { width:14; height:1; radius:1; color:root.themeText; anchors.horizontalCenter:parent.horizontalCenter; anchors.verticalCenter:parent.verticalCenter }
                 Rectangle { width:14; height:1; radius:1; color:root.themeText; anchors.horizontalCenter:parent.horizontalCenter; anchors.verticalCenter:parent.verticalCenter; anchors.verticalCenterOffset:5 }
+            }
+        }
+        Controls.Button {
+            id: settingsButton
+            width:30
+            height:30
+            onClicked: { featurePanel.visible = false; settingsPanel.visible = !settingsPanel.visible }
+            Controls.ToolTip.visible: hovered
+            Controls.ToolTip.delay: 500
+            Controls.ToolTip.text: "Settings"
+            background: Rectangle {
+                radius:5
+                color: settingsButton.down || settingsPanel.visible ? root.alpha(root.themeHighlight, .20)
+                    : (settingsButton.hovered ? root.alpha(root.themeHighlight, .12)
+                    : root.alpha(root.themeBackground, .92))
+                border.width:1
+                border.color:"#ff3030"
+            }
+            contentItem: Item {
+                anchors.fill:parent
+                // a gear: 6 teeth on a ring, drawn in the text colour (Breeze's "configure" icon is sliders)
+                Canvas {
+                    id: gearIcon
+                    anchors.centerIn: parent
+                    width: 18
+                    height: 18
+                    antialiasing: true
+                    onPaint: {
+                        var ctx = getContext("2d")
+                        ctx.reset()
+                        ctx.fillStyle = root.themeText
+                        ctx.translate(9, 9)
+                        ctx.beginPath()
+                        for (var i = 0; i < 6; ++i) {
+                            ctx.save()
+                            ctx.rotate(i * Math.PI / 3)
+                            ctx.rect(-1.6, -8.8, 3.2, 4)
+                            ctx.restore()
+                        }
+                        ctx.fill()
+                        ctx.beginPath()
+                        ctx.arc(0, 0, 6, 0, 2 * Math.PI)
+                        ctx.fill()
+                        // the hole in the middle
+                        ctx.globalCompositeOperation = "destination-out"
+                        ctx.beginPath()
+                        ctx.arc(0, 0, 2.5, 0, 2 * Math.PI)
+                        ctx.fill()
+                    }
+                    Connections { target: root; function onThemeTextChanged() { gearIcon.requestPaint() } }
+                }
             }
         }
         Controls.Button {
@@ -3206,6 +3290,78 @@ font.pixelSize:13 }
                 font.pixelSize:14
                 horizontalAlignment:Text.AlignHCenter
                 verticalAlignment:Text.AlignVCenter
+            }
+        }
+    }
+
+    // Settings: which blocks the main view shows (saved; the widget height follows)
+    Rectangle {
+        id: settingsPanel
+        visible: false
+        anchors.fill: parent
+        anchors.margins: 12
+        radius: 14
+        z: 100
+        color: root.alpha(root.themeBackground, 1)
+        border.width: 1
+        border.color: "#ff3030"
+
+        ColumnLayout {
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.top: parent.top
+            anchors.margins: 10
+            spacing: 8
+
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 8
+                Text {
+                    text: "Settings"
+                    color: root.themeText
+                    font.pixelSize: 16
+                    font.bold: true
+                    Layout.fillWidth: true
+                }
+                Controls.Button {
+                    text: "×"
+                    Layout.preferredWidth: 30
+                    Layout.preferredHeight: 30
+                    onClicked: settingsPanel.visible = false
+                }
+            }
+
+            Text {
+                text: "Main view blocks"
+                color: root.themeText
+                font.pixelSize: 13
+                font.bold: true
+                Layout.topMargin: 4
+            }
+
+            Repeater {
+                model: [
+                    {key: "showSystem", text: "System load (CPU, memory, swap)"},
+                    {key: "showTraffic", text: "Traffic (totals and current speed)"},
+                    {key: "showDrives", text: "External drives"}
+                ]
+                delegate: Controls.CheckBox {
+                    Layout.fillWidth: true
+                    checked: appSettings[modelData.key]
+                    onToggled: appSettings[modelData.key] = checked
+                    text: modelData.text
+                    font.pixelSize: 13
+                }
+            }
+
+            Text {
+                Layout.fillWidth: true
+                Layout.topMargin: 4
+                text: "The widget height follows the shown blocks and the number of connected drives."
+                color: root.themeText
+                opacity: 0.85
+                font.pixelSize: 11
+                wrapMode: Text.WordWrap
             }
         }
     }
