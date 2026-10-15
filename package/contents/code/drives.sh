@@ -4,6 +4,8 @@
 #
 #   drives.sh [run-id]     the run-id only makes every command string unique
 #
+# lsblk and df are time-limited: a dying USB drive must not hang the run.
+#
 # One line per volume, tab-separated:
 #   name size label fstype mountpoint transport model used avail
 # Volumes are the partitions of removable/hotplug/USB disks (or the disk itself when it has
@@ -16,7 +18,7 @@ command -v lsblk >/dev/null 2>&1 || { echo "__NOLSBLK__"; exit 0; }
 
 # \037 between the two steps: tabs are whitespace for read and would merge empty fields
 list_volumes() {
-    lsblk -P -b -o NAME,KNAME,PKNAME,TYPE,SIZE,RM,HOTPLUG,TRAN,FSTYPE,LABEL,MOUNTPOINT,MODEL 2>/dev/null | awk '
+    timeout 5 lsblk -P -b -o NAME,KNAME,PKNAME,TYPE,SIZE,RM,HOTPLUG,TRAN,FSTYPE,LABEL,MOUNTPOINT,MODEL 2>/dev/null | awk '
     function field(line, key,    m, v) {
         # key="value": lsblk -P hex-escapes quotes and other unsafe characters inside values
         if (match(line, "(^| )" key "=\"[^\"]*\"")) {
@@ -68,7 +70,7 @@ list_volumes | while IFS=$'\037' read -r name size label fstype mnt tran model; 
     if [ -n "$mnt" ]; then
         # df needs the real path: undo lsblk's \xNN escapes
         path=$(printf '%b' "$mnt")
-        set -- $(df -P -B1 -- "$path" 2>/dev/null | awk 'NR == 2 { print $3, $4 }')
+        set -- $(timeout 3 df -P -B1 -- "$path" 2>/dev/null | awk 'NR == 2 { print $3, $4 }')
         [ $# -eq 2 ] && { used=$1; avail=$2; }
     fi
     printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$name" "$size" "$label" "$fstype" "$mnt" "$tran" "$model" "$used" "$avail"

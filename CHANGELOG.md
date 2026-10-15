@@ -2,6 +2,12 @@
 
 All changes of My IP & Geo, newest first.
 
+## v6.1.58
+- Whole project checked for leaks of the kind fixed in 6.1.57 and for processes piling up.
+- A command that hangs no longer blocks a feature for good or spawns new processes behind it: every 10 s, commands still running past their limit are stopped (CPU / memory 10 s, traffic 10 s, drives 20 s, local addresses and DNS 30 s, public IP 60 s, internet status 60 s, Monitor 90 s, Apps 30 s) and their "loading" state is cleared. The 2–3 s pollers start a new run only after the previous one finished.
+- Time limits on tools that wait for a system service: `nmcli`, `resolvectl`, `iw` and `timedatectl` in netdiag.sh (5 s), `lsblk` (5 s) and `df` (3 s) in drives.sh.
+- The progress bar of a port scan animates only while it is on screen (a running animation makes Plasma redraw the window even when it is hidden).
+
 ## v6.1.57
 - Fixed high CPU load: the animated CPU / memory / swap bars (since 6.1.52) kept plasmashell's main thread busy, measured at a full core on Kubuntu with the bars shown and about 1.5% with them hidden. The bars now change without animation; with them shown the widget costs about 1% CPU in the test environment (was 20%).
 

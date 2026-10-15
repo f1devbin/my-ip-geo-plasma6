@@ -2138,6 +2138,7 @@ PlasmoidItem {
     }
 
     function refreshDrives() {
+        if (drivesApi.connectedSources.length) return   // the previous run has not finished
         root.drivesSeq += 1
         drivesApi.connectSource("bash " + root.codePath("drives.sh") + " " + root.drivesSeq)
     }
@@ -2154,7 +2155,40 @@ PlasmoidItem {
         }
     }
 
+    // A command that hangs (a stalled D-Bus service, a dying USB drive) would keep its "loading"
+    // flag set for good, and a poller would pile up new processes behind it. Every 10 s each
+    // source that is still connected after its limit is dropped (Plasma kills the process) and
+    // its flag is reset. reapSince keeps the first time a source was seen, only for live sources.
+    property var reapSince: ({})
+    function reapStuckSources() {
+        var now = Date.now(), next = {}
+        var watched = [
+            {api: sysApi, limit: 10000}, {api: trafficApi, limit: 10000}, {api: drivesApi, limit: 20000},
+            {api: uptimeApi, limit: 10000}, {api: publicApi, limit: 60000, reset: function() { root.loading = false }},
+            {api: localApi, limit: 30000}, {api: routeApi, limit: 30000},
+            {api: dnsApi, limit: 30000, reset: function() { root.localLoading = false }},
+            {api: statusApi, limit: 60000, reset: function() { root.networkLoading = false }},
+            {api: monitorApi, limit: 90000, reset: function() { root.monitorLoading = false }},
+            {api: appTrafficApi, limit: 30000, reset: function() { root.appTrafficLoading = false }}
+        ]
+        for (var i = 0; i < watched.length; ++i) {
+            var srcs = watched[i].api.connectedSources
+            for (var j = 0; j < srcs.length; ++j) {
+                var t = root.reapSince[srcs[j]] || now
+                if (now - t > watched[i].limit) {
+                    console.warn("My IP & Geo: dropped a command that did not finish:", srcs[j])
+                    watched[i].api.disconnectSource(srcs[j])
+                    if (watched[i].reset) watched[i].reset()
+                } else {
+                    next[srcs[j]] = t
+                }
+            }
+        }
+        root.reapSince = next
+    }
+
     function refreshSystem() {
+        if (sysApi.connectedSources.length) return
         root.sysSeq += 1
         sysApi.connectSource("MYIPGEO_SEQ=" + root.sysSeq + " sh -c 'head -n 1 /proc/stat; grep -E \"^(MemTotal|MemAvailable|SwapTotal|SwapFree):\" /proc/meminfo'")
     }
@@ -2162,6 +2196,7 @@ PlasmoidItem {
     function refreshTraffic() {
         // Physical adapters only (they have a device in sysfs): VPN tunnels, bridges and veth carry
         // the same bytes a second time. Without any, every interface but lo.
+        if (trafficApi.connectedSources.length) return
         root.trafficSeq += 1
         trafficApi.connectSource("MYIPGEO_SEQ=" + root.trafficSeq + " sh -c 'rx=0; tx=0; n=0; for d in /sys/class/net/*; do [ -e \"$d/device\" ] || continue; read r < \"$d/statistics/rx_bytes\" && read t < \"$d/statistics/tx_bytes\" || continue; rx=$((rx + r)); tx=$((tx + t)); n=$((n + 1)); done; [ $n -gt 0 ] || for d in /sys/class/net/*; do [ \"${d##*/}\" = lo ] && continue; read r < \"$d/statistics/rx_bytes\" && read t < \"$d/statistics/tx_bytes\" || continue; rx=$((rx + r)); tx=$((tx + t)); done; echo \"$rx $tx\"'")
     }
@@ -2342,6 +2377,7 @@ PlasmoidItem {
         id: bootIdApi; engine: "executable"
         onNewData: function(source, data) { bootIdApi.disconnectSource(source); root.loadAppUsage(String(data.stdout || "").trim()) }
     }
+    Timer { interval: 10000; repeat: true; running: true; onTriggered: root.reapStuckSources() }
     Timer { id: appUsageRetry; interval: 600000; onTriggered: root.startAppUsage(120) }
     Plasma5Support.DataSource { id: appTrafficApi; engine:"executable"; onNewData:function(source,data){
         appTrafficApi.disconnectSource(source)
@@ -3131,7 +3167,7 @@ font.pixelSize:13 }
                     Item { Layout.fillWidth: true }
                     Image { source: Qt.resolvedUrl("../images/github.svg"); sourceSize.width: 18; sourceSize.height: 18; Layout.preferredWidth: 18; Layout.preferredHeight: 18 }
                     Text { text: "GitHub"; color: root.themeLink; font.pixelSize: 13; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: Qt.openUrlExternally("https://github.com/f1devbin/my-ip-geo-plasma6") } }
-                    Text { text: "· v6.1.57"; color: root.themeText; opacity: 0.8; font.pixelSize: 11 }
+                    Text { text: "· v6.1.58"; color: root.themeText; opacity: 0.8; font.pixelSize: 11 }
                 }
             }
         }
@@ -3826,7 +3862,8 @@ font.pixelSize:13 }
                                                         to: psBar.width
                                                         duration: 1200
                                                         loops: Animation.Infinite
-                                                        running: hostRow.pstate === "running"
+                                                        // only while seen: a running animation makes the window redraw
+                                                        running: hostRow.pstate === "running" && psBar.visible
                                                     }
                                                 }
                                             }

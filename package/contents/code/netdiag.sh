@@ -1,7 +1,8 @@
 #!/bin/bash
 # My IP & Geo - network checks for the Diagnostics tab and the header indicators.
 # Runs as a normal user with standard tools only: ip, ping, getent, curl.
-# iw, nmcli, resolvectl and timedatectl add details when they are installed.
+# iw, nmcli, resolvectl and timedatectl add details when they are installed (each limited to 5 s:
+# a stalled D-Bus service must not keep the check, and the widget waiting for it, hanging).
 #
 #   netdiag.sh <check> [run-id]        the run-id only makes every command string unique
 #     status    ONLINE <s> <path> | VPN <s> <path> | OFFLINE (header indicators; a new path refreshes the public IP)
@@ -121,7 +122,7 @@ check_status() {
     fi
     if [ -z "$t" ]; then
         # All probes failed (or no route): trust NetworkManager only if it just saw full connectivity
-        conn=$(nmcli -t -f CONNECTIVITY networking connectivity check 2>/dev/null | head -n 1)
+        conn=$(timeout 5 nmcli -t -f CONNECTIVITY networking connectivity check 2>/dev/null | head -n 1)
         [ "$conn" = full ] || { echo OFFLINE; return; }
     fi
     if [ -n "$(vpn_ifaces)" ]; then echo "VPN ${t:-0} $(net_path)"; else echo "ONLINE ${t:-0} $(net_path)"; fi
@@ -150,12 +151,12 @@ dns_clean() {
 
 # resolvectl when systemd-resolved runs, else NetworkManager, else /etc/resolv.conf
 dnsmap_raw() {
-    if have resolvectl && resolvectl --no-pager dns > "$tmp/r" 2>/dev/null && grep -q '): [^ ]' "$tmp/r"; then
+    if have resolvectl && timeout 5 resolvectl --no-pager dns > "$tmp/r" 2>/dev/null && grep -q '): [^ ]' "$tmp/r"; then
         cat "$tmp/r"
         return
     fi
     if have nmcli; then
-        nmcli -t -f GENERAL.DEVICE,IP4.DNS,IP6.DNS device show 2>/dev/null | awk '
+        timeout 5 nmcli -t -f GENERAL.DEVICE,IP4.DNS,IP6.DNS device show 2>/dev/null | awk '
             { i = index($0, ":"); key = substr($0, 1, i - 1); val = substr($0, i + 1); gsub(/\\:/, ":", val) }
             key == "GENERAL.DEVICE" { if (dev != "" && dns != "") print "Link 0 (" dev "): " dns; dev = val; dns = ""; next }
             key ~ /^IP[46]\.DNS/ && val != "" { dns = dns (dns == "" ? "" : " ") val }
@@ -178,8 +179,8 @@ iface_info() {
     echo "IFACE $dev kind=$kind devtype=${devtype:--} operstate=$(cat "$p/operstate" 2>/dev/null) mtu=$(cat "$p/mtu" 2>/dev/null) speed=$(cat "$p/speed" 2>/dev/null) duplex=$(cat "$p/duplex" 2>/dev/null) mac=$(cat "$p/address" 2>/dev/null)"
     ip -o addr show dev "$dev" 2>/dev/null | awk -v d="$dev" '$3 == "inet" || $3 == "inet6" { print "ADDR", d, $3, $4 }'
     if [ "$kind" = wifi ]; then
-        have iw && iw dev "$dev" link 2>/dev/null | sed "s/^/IW $dev /"
-        have nmcli && nmcli -t -f IN-USE,SSID,CHAN,FREQ,RATE,SIGNAL device wifi list ifname "$dev" --rescan no 2>/dev/null | grep '^\*' | head -n 1 | sed "s/^/NMWIFI $dev /"
+        have iw && timeout 5 iw dev "$dev" link 2>/dev/null | sed "s/^/IW $dev /"
+        have nmcli && timeout 5 nmcli -t -f IN-USE,SSID,CHAN,FREQ,RATE,SIGNAL device wifi list ifname "$dev" --rescan no 2>/dev/null | grep '^\*' | head -n 1 | sed "s/^/NMWIFI $dev /"
         grep -s "^ *$dev:" /proc/net/wireless | sed "s/^ */PROCWL /"
     fi
 }
@@ -200,8 +201,8 @@ check_link() {
     # Process names are readable for everyone: a running VPN application names the tunnel
     cat /proc/[0-9]*/comm 2>/dev/null | sort -u | grep -Ex 'riseup-vpn|calyx-vpn|bitmask|mullvad-daemon|nordvpnd|expressvpnd|windscribe|protonvpn-app|protonvpn|AmneziaVPN|amnezia-vpn|hiddify|openconnect|openfortivpn' | sed 's/^/VPNAPP /'
     if have nmcli; then
-        nmcli -t -f CONNECTIVITY general 2>/dev/null | head -n 1 | sed 's/^/NMCONN /'
-        nmcli -t -f DEVICE,NAME connection show --active 2>/dev/null | sed 's/^/NMACTIVE /'
+        timeout 5 nmcli -t -f CONNECTIVITY general 2>/dev/null | head -n 1 | sed 's/^/NMCONN /'
+        timeout 5 nmcli -t -f DEVICE,NAME connection show --active 2>/dev/null | sed 's/^/NMACTIVE /'
     fi
 }
 
@@ -260,7 +261,7 @@ check_web() {
     cat "$tmp/web" "$tmp/web4" "$tmp/portal"
     head -n 1 "$tmp/err" | sed 's/^/WEBERR /'
     grep -Es '^(ip|loc|colo|warp|tls|http)=' "$tmp/trace" | head -n 8 | sed 's/^/TRACE /'
-    have timedatectl && timedatectl show -p NTPSynchronized --value 2>/dev/null | head -n 1 | sed 's/^/NTP /'
+    have timedatectl && timeout 5 timedatectl show -p NTPSynchronized --value 2>/dev/null | head -n 1 | sed 's/^/NTP /'
 }
 
 check_ipv6() {
