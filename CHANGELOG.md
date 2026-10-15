@@ -2,6 +2,9 @@
 
 All changes of My IP & Geo, newest first.
 
+## v6.1.54
+- The widget cannot be made smaller than the main view needs: its minimum height now counts the traffic bar and the CPU / memory / swap bars, which were pushed out of the bottom edge of a widget that was sized for the view before 6.1.52. A widget that is too low grows to the minimum; new widgets start 520 px high.
+
 ## v6.1.53
 - Monitor: a "Check now" button next to the status line checks all watched devices at once instead of waiting for the next 30-second check. While the check runs the line says "Checking…" and the button is disabled.
 

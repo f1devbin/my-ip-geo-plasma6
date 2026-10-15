@@ -15,9 +15,11 @@ PlasmoidItem {
     Kirigami.Theme.inherit: false
 
     width: 500
-    height: 480
+    height: 520
     Layout.minimumWidth: 400
-    Layout.minimumHeight: 400
+    // Never smaller than the main view needs: margins 2 x 14, title 30, tabs 34, Public IP card 220,
+    // traffic bar, system bars and 4 x 6 spacing (the system bars used to be pushed out of the widget)
+    Layout.minimumHeight: 28 + 30 + 34 + 220 + trafficBar.Layout.preferredHeight + systemBar.Layout.preferredHeight + 4 * 6
 
     property int tab: 0
     property int toolsTab: 0
@@ -2843,7 +2845,7 @@ font.pixelSize:13 }
                             spacing: 5
                             Image { source: Qt.resolvedUrl("../images/github.svg"); sourceSize.width: 18; sourceSize.height: 18; Layout.preferredWidth: 18; Layout.preferredHeight: 18 }
                             Text { text: "GitHub"; color: root.themeLink; font.pixelSize: 13; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: Qt.openUrlExternally("https://github.com/f1devbin/my-ip-geo-plasma6") } }
-                            Text { text: "· v6.1.53"; color: root.themeSecondary; font.pixelSize: 10 }
+                            Text { text: "· v6.1.54"; color: root.themeSecondary; font.pixelSize: 10 }
                             Item { Layout.fillWidth: true }
                         }
                     }
