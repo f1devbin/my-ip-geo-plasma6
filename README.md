@@ -6,7 +6,7 @@ It needs no root rights and nothing extra to install on Kubuntu: it only uses to
 
 **Version 6.1.60** · [Changelog](CHANGELOG.md) · [Download](https://github.com/f1devbin/my-ip-geo-plasma6/releases/latest)
 
-<img src="screenshots/main.png" width="416" alt="Main view: public IP, location, provider, CPU / memory / swap, traffic, external drives">
+<img src="screenshots/main.png" width="412" alt="Main view: public IP, location, provider, CPU / memory / swap, traffic, external drives">
 
 ## Features
 
@@ -38,9 +38,10 @@ It needs no root rights and nothing extra to install on Kubuntu: it only uses to
 | <img src="screenshots/local-ips.png" width="400" alt="Local IPs"> | <img src="screenshots/scanner.png" width="400" alt="Scanner with port scan"> |
 | <img src="screenshots/diagnostics.png" width="400" alt="Diagnostics"> | <img src="screenshots/diagnostics-details.png" width="400" alt="Diagnostics: public IP, IPv6, VPN, MTU, route"> |
 | <img src="screenshots/speed.png" width="400" alt="Speed test"> | <img src="screenshots/apps.png" width="400" alt="Traffic per application"> |
-| <img src="screenshots/monitor.png" width="400" alt="Monitor"> | |
+| <img src="screenshots/monitor.png" width="400" alt="Monitor"> | <img src="screenshots/hardware.png" width="400" alt="Hardware: computer and processor"> |
+| <img src="screenshots/hardware-memory.png" width="400" alt="Hardware: memory slots and modules"> | <img src="screenshots/hardware-storage.png" width="400" alt="Hardware: disks with temperature and health, network adapters"> |
 
-The main screenshot shows the address of a VPN exit server. The other screenshots were taken on a test network; all addresses in them are documentation examples.
+The main screenshot shows the address of a VPN exit server. The other screenshots were taken on a test network; all addresses in them are documentation examples, and the Hardware screenshots show an example computer.
 
 ## Requirements
 
