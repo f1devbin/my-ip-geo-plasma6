@@ -7,6 +7,8 @@ on:
     tags: ['v*']
   pull_request:
   workflow_dispatch:
+  schedule:
+    - cron: '17 4 * * 1'   # Mondays: catches breakage from Plasma and Kubuntu updates
 
 permissions:
   contents: write
@@ -40,3 +42,33 @@ jobs:
           gh release create "$GITHUB_REF_NAME" dist/*.zip dist/*.plasmoid
           --title "My IP & Geo $GITHUB_REF_NAME"
           --notes-file dist/release-notes.md
+
+  # The widget running for real in Plasma 6: QML errors, CPU, memory growth, processes started
+  runtime:
+    runs-on: ubuntu-latest
+    container: ubuntu:26.04
+    steps:
+      - name: Plasma 6, viewer and a virtual display
+        run: |
+          apt-get update -q
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends \
+            plasma-workspace plasma-desktop plasma-sdk kpackagetool6 xvfb dbus-x11 imagemagick \
+            qml6-module-org-kde-plasma-plasma5support qml6-module-qtquick-controls qml6-module-qtquick-layouts qml6-module-qtcore \
+            breeze-icon-theme fonts-noto-core curl iproute2 iputils-ping perl util-linux procps pciutils ca-certificates
+
+      - uses: actions/checkout@v4
+
+      - name: Run the widget (longer on the weekly run)
+        run: |
+          useradd -m tester
+          chown -R tester .
+          runuser -u tester -- tests/runtime-check.sh ${{ github.event_name == 'schedule' && '1800' || '240' }}
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: runtime-check
+          path: |
+            tests/runtime-check.png
+            tests/runtime-check.log
+

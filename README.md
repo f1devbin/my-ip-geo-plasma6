@@ -4,7 +4,7 @@ A compact KDE Plasma 6 widget for your public IP address and location, your loca
 
 It needs no root rights and nothing extra to install on Kubuntu: it only uses tools that are already there (curl, iproute2, ping, bash, Perl).
 
-**Version 6.1.59** · [Changelog](CHANGELOG.md) · [Download](https://github.com/f1devbin/my-ip-geo-plasma6/releases/latest)
+**Version 6.1.60** · [Changelog](CHANGELOG.md) · [Download](https://github.com/f1devbin/my-ip-geo-plasma6/releases/latest)
 
 <img src="screenshots/main.png" width="416" alt="Main view: public IP, location, provider, CPU / memory / swap, traffic, external drives">
 
@@ -14,7 +14,7 @@ It needs no root rights and nothing extra to install on Kubuntu: it only uses to
 
 **Local IPs.** Every network interface with its type, MAC address, all IPv4 and IPv6 addresses (one per line, with the subnet mask), gateway and DNS servers.
 
-**System load.** CPU, memory and swap as bars with their values, green / yellow / red by load, refreshed every 2 seconds.
+**System load.** CPU, memory, swap and the system disk as bars with their values, green / yellow / red by load, refreshed every 2 seconds (the disk every 30).
 
 **Traffic.** Data received and sent since boot and the current speed of each (physical adapters), refreshed every 2 seconds.
 
@@ -29,8 +29,9 @@ It needs no root rights and nothing extra to install on Kubuntu: it only uses to
 - **Scanner.** Finds every device on the local network (any network up to /20, the /24 around this computer by default), including devices that ignore ping (they are found through ARP), and shows router and reverse-DNS names. The magnifier button next to a device scans its TCP ports: the whole range 1-65535 by default, or any range you enter. The whole range takes about a second on a LAN, or about 20 seconds when the device's firewall silently drops closed ports.
 - **Diagnostics.** Checks the chain connection → router → DNS → internet → websites and names the first broken link in plain words, or shows "Everything works" with latency, jitter and packet loss. Also shows the public IP and Cloudflare location, IPv6, VPN, path MTU and the route to 1.1.1.1 with the latency of each hop, and warns about weak Wi-Fi, packet loss, slow or hijacked DNS, broken IPv6 and sign-in pages (captive portals).
 - **Speed.** Download and upload over 4 parallel streams, ping and jitter, against Cloudflare's speed test servers.
-- **Apps.** Which applications use the network: traffic leaders for the last hour, the last 24 hours or since boot, with the live speed and the connections of each application. Uses the helper of KDE System Monitor.
+- **Apps.** Which applications use the network: traffic leaders for the last hour, the last 24 hours or since boot, with the live speed and the connections of each application. Uses the helper of KDE System Monitor. The counting runs in the background and can be switched off with the checkbox at the bottom of the tab.
 - **Monitor.** Watch devices by IP address. They are checked every 30 seconds (ping, or ARP for devices that ignore ping), and a desktop notification appears when a device goes offline or comes back. "Check now" runs the check at once.
+- **Hardware.** What the computer is made of: model, motherboard, firmware, processor with its temperature, memory slots and modules (size, type, speed, part number), graphics and displays, disks with temperature and SMART health (through udisks), network adapters including mobile broadband modems, battery health and sound cards. "Copy" puts the whole report on the clipboard as text. Read without root rights; serial numbers and MAC addresses are not shown.
 
 | | |
 |---|---|
@@ -45,7 +46,7 @@ The main screenshot shows the address of a VPN exit server. The other screenshot
 
 - KDE Plasma 6. Developed and tested on Kubuntu 26.04.
 - Tools that Kubuntu installs by default: `bash`, `curl`, `ip` and `ss` (iproute2), `ping` (iputils-ping), `perl` (perl-base).
-- Used when available: NetworkManager or `iw` (Wi-Fi details), `resolvectl` (DNS servers), `notify-send` (notifications; D-Bus is used otherwise), `ksgrd_network_helper` from KDE System Monitor (traffic per application; installed with `plasma-systemmonitor`).
+- Used when available: NetworkManager or `iw` (Wi-Fi details), `resolvectl` (DNS servers), `notify-send` (notifications; D-Bus is used otherwise), `ksgrd_network_helper` from KDE System Monitor (traffic per application; installed with `plasma-systemmonitor`). `lspci` (pciutils) names graphics and network adapters in the Hardware tab.
 
 No root rights, capabilities or background services.
 
@@ -91,12 +92,15 @@ The scanner, the port scan, the local interfaces, the traffic per application an
 
 ```bash
 ./build.sh        # checks the version everywhere, the scripts, builds dist/*.zip and dist/*.plasmoid
-tests/run.sh      # unit tests (Node.js), they run the functions of the shipped main.qml
+tests/run.sh      # unit tests (Node.js, bash): the functions of the shipped main.qml and the helper scripts
+tests/runtime-check.sh   # the widget running in Plasma 6 on a virtual display: QML errors, CPU, memory, processes
 ```
 
 Install a local build with `kpackagetool6 -t Plasma/Applet -i dist/my-ip-geo-plasma6-v*.zip` (or `-u` to update).
 
-Layout: `package/` is the Plasma package (`metadata.json`, `contents/ui/main.qml`, the helper scripts in `contents/code/`). A tag `v<version>` builds the package on GitHub Actions and publishes it as a release.
+Layout: `package/` is the Plasma package: `metadata.json`; `contents/ui/main.qml` (state, logic, main view and header) with one file per tools tab next to it (`ScannerTab.qml`, `DiagnosticsTab.qml`, `SpeedTab.qml`, `AppsTab.qml`, `MonitorTab.qml`, `HardwareTab.qml`, `SettingsPanel.qml`); the helper scripts in `contents/code/`.
+
+GitHub Actions runs the unit tests and the run-time check on every push and pull request, and a 30-minute run-time check every week. A release is one step: Actions → Release → Run workflow with the new version; it moves the "Unreleased" changelog section to that version, tests, builds, tags and publishes the package.
 
 ## License
 

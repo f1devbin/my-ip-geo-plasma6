@@ -10,3 +10,7 @@
 *~
 .idea/
 .vscode/
+
+# runtime check output
+/tests/runtime-check.png
+/tests/runtime-check.log

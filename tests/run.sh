@@ -26,4 +26,19 @@ if out=$(bash test_v55.sh ../package/contents/code/drives.sh 2>&1); then
 else
     printf 'FAIL  test_v55.sh\n'; printf '%s\n' "$out" | tail -n 25; fail=1
 fi
+if out=$(bash test_hardware.sh ../package/contents/code/hardware.sh 2>&1); then
+    printf 'ok    %-22s %s passed\n' test_hardware.sh "$(printf '%s\n' "$out" | grep -c '^ok')"
+else
+    printf 'FAIL  test_hardware.sh\n'; printf '%s\n' "$out" | tail -n 25; fail=1
+fi
+if out=$(bash test_sample.sh ../package/contents/code/sample.sh 2>&1); then
+    printf 'ok    %-22s %s passed\n' test_sample.sh "$(printf '%s\n' "$out" | grep -c '^ok')"
+else
+    printf 'FAIL  test_sample.sh\n'; printf '%s\n' "$out" | tail -n 25; fail=1
+fi
+if out=$(bash test_sources.sh "$qml" 2>&1); then
+    printf 'ok    %-22s %s passed\n' test_sources.sh "$(printf '%s\n' "$out" | grep -c '^ok')"
+else
+    printf 'FAIL  test_sources.sh\n'; printf '%s\n' "$out" | tail -n 25; fail=1
+fi
 exit $fail

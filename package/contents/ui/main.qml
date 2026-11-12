@@ -38,6 +38,14 @@ PlasmoidItem {
     property bool networkLoading: false
     property bool speedLoading: false
     property bool appTrafficLoading: false
+    // Hardware tab: sections built by parseHardware(), read when the tab is opened
+    property var hwSections: []
+    property bool hwLoading: false
+    property string hwUpdated: ""
+    property int hwSeq: 0
+    property bool hwCopied: false
+    property int sampleTick: 0
+    property string drivesSignature: ""
     property var appTraffic: []
     property var appExpanded: ({})
     property string appTrafficStatus: "Ready"
@@ -64,7 +72,6 @@ PlasmoidItem {
     property bool scanLoading: false
     property string scanStatus: ""
     property int scanSeq: 0
-    property int trafficSeq: 0
     property int speedRunSeq: 0
     property string monitorError: ""
     property var scanHosts: []
@@ -170,14 +177,16 @@ PlasmoidItem {
     property var speedSamplePrev: ({})
     property real speedSampleTime: 0
     property string trafficReceived: "—"
-    // CPU, memory and swap below the traffic bar: -1 = not read yet
+    // CPU, memory, swap and system disk: -1 = not read yet
     property real cpuPct: -1
     property var cpuPrev: null
     property real memUsed: -1
     property real memTotal: 0
     property real swapUsed: -1
     property real swapTotal: 0
-    property int sysSeq: 0
+    property real diskSize: 0
+    property real diskUsed: -1
+    property real diskAvail: -1
     property int publicSeq: 0
     property int dnsSeq: 0
     property string trafficSent: "—"
@@ -186,9 +195,13 @@ PlasmoidItem {
     property var trafficPrev: null
     property real trafficRxRate: -1
     property real trafficTxRate: -1
-    // External drives (drives.sh), polled every 3 s
+    // External drives (drives.sh): re-read when the sample reports a change, and once a minute
     property var drives: []
     property int drivesSeq: 0
+
+    // For the views in their own files (ScannerTab.qml ...): they get this object as "root"
+    readonly property var widgetRoot: root
+    property alias settings: appSettings
 
     Settings {
         id: appSettings
@@ -199,100 +212,12 @@ PlasmoidItem {
         property bool showSystem: true
         property bool showTraffic: true
         property bool showDrives: true
+        // Background traffic accounting per application (the KDE System Monitor helper runs all the time)
+        property bool trackApps: true
     }
 
     Plasmoid.icon: "/icon.png"
 
-    // Status mark of the Diagnostics tab: filled circle with a check, "!" or a cross, a spinning arc while running
-    component DiagIcon: Item {
-        id: diagIcon
-        property string status: "pending"
-        property real size: 18
-        readonly property color tint: root.diagTint(status)
-        width: size
-        height: size
-        Canvas {
-            id: diagIconMark
-            anchors.fill: parent
-            visible: diagIcon.status !== "running"
-            antialiasing: true
-            onVisibleChanged: if (visible) requestPaint()
-            onPaint: {
-                var ctx = getContext("2d")
-                ctx.reset()
-                var s = width
-                var c = s / 2
-                if (diagIcon.status === "pending") {
-                    ctx.lineWidth = 1.5
-                    ctx.strokeStyle = root.cssColor(diagIcon.tint, 1)
-                    ctx.beginPath()
-                    ctx.arc(c, c, c - 1.5, 0, 2 * Math.PI, false)
-                    ctx.stroke()
-                    return
-                }
-                ctx.fillStyle = root.cssColor(diagIcon.tint, 1)
-                ctx.beginPath()
-                ctx.arc(c, c, c - 0.5, 0, 2 * Math.PI, false)
-                ctx.fill()
-                ctx.strokeStyle = "#10151d"
-                ctx.fillStyle = "#10151d"
-                ctx.lineWidth = Math.max(1.8, s * 0.12)
-                ctx.lineCap = "round"
-                ctx.lineJoin = "round"
-                ctx.beginPath()
-                if (diagIcon.status === "ok") {
-                    ctx.moveTo(s * 0.29, s * 0.53)
-                    ctx.lineTo(s * 0.44, s * 0.68)
-                    ctx.lineTo(s * 0.72, s * 0.37)
-                    ctx.stroke()
-                } else if (diagIcon.status === "fail") {
-                    ctx.moveTo(s * 0.35, s * 0.35)
-                    ctx.lineTo(s * 0.65, s * 0.65)
-                    ctx.moveTo(s * 0.65, s * 0.35)
-                    ctx.lineTo(s * 0.35, s * 0.65)
-                    ctx.stroke()
-                } else if (diagIcon.status === "warn") {
-                    ctx.moveTo(c, s * 0.27)
-                    ctx.lineTo(c, s * 0.56)
-                    ctx.stroke()
-                    ctx.beginPath()
-                    ctx.arc(c, s * 0.74, ctx.lineWidth * 0.6, 0, 2 * Math.PI, false)
-                    ctx.fill()
-                } else {
-                    ctx.moveTo(s * 0.32, c)
-                    ctx.lineTo(s * 0.68, c)
-                    ctx.stroke()
-                }
-            }
-        }
-        Canvas {
-            id: diagIconSpinner
-            anchors.fill: parent
-            visible: diagIcon.status === "running"
-            antialiasing: true
-            onVisibleChanged: if (visible) requestPaint()
-            onPaint: {
-                var ctx = getContext("2d")
-                ctx.reset()
-                var c = width / 2
-                ctx.lineWidth = Math.max(2, width * 0.13)
-                ctx.lineCap = "round"
-                ctx.strokeStyle = root.cssColor(diagIcon.tint, 1)
-                ctx.beginPath()
-                ctx.arc(c, c, c - ctx.lineWidth / 2 - 0.5, 0, 1.4 * Math.PI, false)
-                ctx.stroke()
-            }
-            RotationAnimation on rotation {
-                from: 0
-                to: 360
-                duration: 900
-                loops: Animation.Infinite
-                running: diagIconSpinner.visible
-            }
-        }
-        onStatusChanged: { diagIconMark.requestPaint(); diagIconSpinner.requestPaint() }
-        onTintChanged: { diagIconMark.requestPaint(); diagIconSpinner.requestPaint() }
-    }
 
     // publicip.sh output: "__SRC__ <provider>" and the provider's answer -> one set of fields
     function parsePublicIp(text) {
@@ -1611,6 +1536,8 @@ PlasmoidItem {
     // in back-to-back 2-minute chunks from Plasma start. Totals are kept per process name and saved
     // with the boot id: they survive Plasma restarts, a reboot starts from zero.
     function startAppUsage(secs) {
+        if (!appSettings.trackApps) return
+        if (appUsageApi.connectedSources.length) return   // a chunk is still counting (switched off and on again)
         root.appUsageChunkSecs = secs > 0 ? secs : 120
         root.appUsageChunkStart = Date.now()
         // A new command string every time: re-connecting the same source right after it finished
@@ -2026,6 +1953,202 @@ PlasmoidItem {
         root.speedSampleTime = now
     }
 
+    // Memory sizes the way modules are sold (binary): "8 GB", "512 MB"
+    function memSize(bytes) {
+        var n = Number(bytes)
+        if (!(n > 0)) return ""
+        var g = n / (1024 * 1024 * 1024)
+        if (g >= 1) return (Math.abs(g - Math.round(g)) < 0.05 ? String(Math.round(g)) : g.toFixed(1)) + " GB"
+        return Math.round(n / (1024 * 1024)) + " MB"
+    }
+
+    // Disk sizes the way drives are sold (decimal): "512 GB", "1 TB", "2.5 TB"
+    function driveSize(bytes) {
+        var n = Number(bytes)
+        if (!(n > 0)) return ""
+        if (n >= 1e12) { var t = n / 1e12; return (Math.abs(t - Math.round(t)) < 0.05 ? String(Math.round(t)) : t.toFixed(1)) + " TB" }
+        if (n >= 1e9) return Math.round(n / 1e9) + " GB"
+        return Math.round(n / 1e6) + " MB"
+    }
+
+    // "6144K" (sysfs cache size) -> "6 MB"
+    function cacheSize(text) {
+        var m = String(text || "").match(/^(\d+)([KM])$/)
+        if (!m) return String(text || "")
+        var kb = +m[1] * (m[2] === "M" ? 1024 : 1)
+        return kb >= 1024 ? (kb % 1024 === 0 ? kb / 1024 : (kb / 1024).toFixed(1)) + " MB" : kb + " KB"
+    }
+
+    // hardware.sh records -> sections for the Hardware tab:
+    // [{title, icon, rows: [{k, v}], tiles: [{title, line1, line2, dim}]}]
+    function parseHardware(text) {
+        var rec = {}
+        var lines = String(text || "").split("\n")
+        for (var i = 0; i < lines.length; ++i) {
+            var f = lines[i].replace(/\r$/, "").split("\t")
+            if (!/^[A-Z]+$/.test(f[0])) continue
+            for (var j = 1; j < f.length; ++j) {
+                f[j] = f[j].replace(/\s+/g, " ").trim()
+                if (/^(unknown|other|<out of spec>)$/i.test(f[j])) f[j] = ""
+            }
+            if (!rec[f[0]]) rec[f[0]] = []
+            rec[f[0]].push(f)
+        }
+        function one(tag) { return rec[tag] ? rec[tag][0] : null }
+        function all(tag) { return rec[tag] || [] }
+        function join(parts, sep) { return parts.filter(function(x) { return x !== undefined && x !== null && String(x) !== "" }).join(sep) }
+        function row(rows, k, v) { if (v !== undefined && v !== null && String(v) !== "") rows.push({k: k, v: String(v)}) }
+        var out = []
+
+        // System, board, firmware, OS
+        var rows = []
+        var sys = one("SYS"), board = one("BOARD"), bios = one("BIOS"), os = one("OS")
+        if (sys) {
+            // Lenovo keeps the name in "version" (ThinkPad T490) and a type number in "product"
+            var named = /[A-Za-z]{3}/.test(sys[3] || "") && !/^(rev|ver|version|type)\b/i.test(sys[3])
+            row(rows, "Model", named ? join([sys[1], sys[3]], " ") + (sys[2] ? " (" + sys[2] + ")" : "") : join([sys[1], sys[2]], " "))
+            row(rows, "Type", sys[4])
+        }
+        if (board) row(rows, "Motherboard", join([join([board[1], board[2]], " "), board[3]], " · "))
+        if (bios) row(rows, "Firmware", join([bios[4], join([bios[1], bios[2]], " "), bios[3]], " · "))
+        if (os) { row(rows, "System", os[1]); row(rows, "Kernel", join([os[2], os[3]], " · ")) }
+        if (rows.length) out.push({title: "Computer", icon: "computer", rows: rows, tiles: []})
+
+        // Processor
+        var cpu = one("CPU")
+        if (cpu && cpu[1]) {
+            rows = []
+            row(rows, "Model", cpu[1].replace(/\((R|TM)\)/gi, "").replace(/\s+CPU\s+/, " ").replace(/\s+/g, " "))
+            var cores = +cpu[3], threads = +cpu[4], sockets = +cpu[2]
+            row(rows, "Cores", join([cores + (cores === 1 ? " core" : " cores"), threads + (threads === 1 ? " thread" : " threads"),
+                                     sockets > 1 ? sockets + " sockets" : ""], " · "))
+            if (+cpu[5] > 0) row(rows, "Max frequency", (+cpu[5] / 1000).toFixed(2) + " GHz")
+            row(rows, "Cache", join([cpu[6] ? "L2 " + root.cacheSize(cpu[6]) : "", cpu[7] ? "L3 " + root.cacheSize(cpu[7]) : ""], " · "))
+            var temps = all("TEMP")
+            for (i = 0; i < temps.length; ++i) if (temps[i][1] === "cpu" && temps[i][2] !== "") row(rows, "Temperature", temps[i][2] + " °C")
+            out.push({title: "Processor", icon: "cpu", rows: rows, tiles: []})
+        }
+
+        // Memory: totals and one tile per slot
+        var mem = one("MEM")
+        if (mem) {
+            rows = []
+            var tiles = []
+            var dimms = all("DIMM"), installed = 0, used = 0, types = {}
+            for (i = 0; i < dimms.length; ++i) {
+                var d = dimms[i], size = +d[2]
+                if (size > 0) {
+                    installed += size; used += 1
+                    if (d[3]) types[d[3]] = 1
+                    tiles.push({title: d[1], line1: join([root.memSize(size), d[3], d[7]], " "),
+                                line2: join([+d[4] > 0 ? d[4] + " MT/s" : "", join([d[5], d[6]], " ")], " · "), dim: false})
+                } else {
+                    tiles.push({title: d[1], line1: "Empty slot", line2: join([d[3], d[7]], " "), dim: true})
+                }
+            }
+            if (installed > 0) row(rows, "Installed", join([root.memSize(installed), Object.keys(types).join(" + ")], " "))
+            row(rows, installed > 0 ? "Usable" : "Total", root.formatBytes(mem[1]))
+            var slots = +mem[2] > 0 ? +mem[2] : dimms.length
+            if (dimms.length) row(rows, "Slots", used + " of " + slots + " used" + (slots - used > 0 ? " · " + (slots - used) + " free" : ""))
+            if (+mem[3] > 0) row(rows, "Maximum", root.memSize(mem[3]))
+            if (mem[4] !== "yes") row(rows, "Modules", "This system does not report its memory modules without root rights")
+            out.push({title: "Memory", icon: "memory", rows: rows, tiles: tiles})
+        }
+
+        // Graphics and displays
+        rows = []
+        var gpus = all("GPU"), disp = all("DISPLAY")
+        for (i = 0; i < gpus.length; ++i) row(rows, gpus.length > 1 ? "Adapter " + (i + 1) : "Adapter", join([gpus[i][1], gpus[i][2] ? "driver " + gpus[i][2] : ""], " · "))
+        for (i = 0; i < disp.length; ++i) row(rows, disp.length > 1 ? "Display " + (i + 1) : "Display", join([disp[i][1], disp[i][2] ? disp[i][2].replace("x", " × ") : ""], " · "))
+        if (rows.length) out.push({title: "Graphics", icon: "video-display", rows: rows, tiles: []})
+
+        // Storage: a tile per disk
+        var disks = all("DISK")
+        if (disks.length) {
+            rows = []; tiles = []
+            var internal = 0, external = 0, sum = 0, health = {}, hl = all("HEALTH")
+            for (i = 0; i < hl.length; ++i) health[hl[i][1]] = hl[i]
+            var healthRows = []
+            for (i = 0; i < disks.length; ++i) {
+                var k = disks[i], ext = k[4] === "usb" || k[6] === "1", h = health[k[1]]
+                if (ext) external += 1; else internal += 1
+                sum += +k[2]
+                tiles.push({title: k[1] + " · " + root.driveSize(k[2]),
+                            line1: join([k[3] + (ext && k[4] !== "usb" ? " · removable" : ""), h && h[2] !== "" ? h[2] + " °C" : ""], " · "),
+                            line2: k[5] || "", dim: false})
+                // The drive's own SMART verdict (as udisks last read it), hours of operation, reallocated sectors
+                if (h && h[3] !== "")
+                    row(healthRows, k[1] + " health", join([h[3] === "failing" ? "FAILING: back up your data" : "Healthy",
+                        +h[4] > 0 ? h[4] + " h powered on" : "", h[5] !== "" ? h[5] + (h[5] === "1" ? " bad sector" : " bad sectors") : ""], " · "))
+            }
+            row(rows, "Disks", join([disks.length + (disks.length === 1 ? " disk" : " disks"),
+                                     external > 0 ? internal + " internal, " + external + " external" : "", root.driveSize(sum) + " in total"], " · "))
+            rows = rows.concat(healthRows)
+            out.push({title: "Storage", icon: "drive-harddisk", rows: rows, tiles: tiles})
+        }
+
+        // Network adapters
+        var nets = all("NET")
+        if (nets.length) {
+            rows = []
+            for (i = 0; i < nets.length; ++i)
+                row(rows, nets[i][1], join([nets[i][2], nets[i][3], nets[i][4] ? "driver " + nets[i][4] : "", +nets[i][5] > 0 ? nets[i][5] + " Mbit/s" : ""], " · "))
+            out.push({title: "Network adapters", icon: "network-wired", rows: rows, tiles: []})
+        }
+
+        // Batteries
+        var bats = all("BAT")
+        for (i = 0; i < bats.length; ++i) {
+            var b = bats[i]
+            rows = []
+            row(rows, "Model", join([join([b[2], b[3]], " "), b[4]], " · "))
+            if (+b[6] > 0 && +b[5] > 0) row(rows, "Capacity", b[6] + " of " + b[5] + " Wh · " + Math.round(100 * b[6] / b[5]) + "% of new")
+            else if (+b[6] > 0) row(rows, "Capacity", b[6] + " Wh")
+            if (+b[7] > 0) row(rows, "Cycles", b[7])
+            row(rows, "State", join([b[8], b[9] !== "" ? b[9] + "%" : ""], " · "))
+            out.push({title: bats.length > 1 ? "Battery " + b[1] : "Battery", icon: "battery", rows: rows, tiles: []})
+        }
+
+        // Sound cards
+        var audio = all("AUDIO")
+        if (audio.length) {
+            rows = []
+            for (i = 0; i < audio.length; ++i) row(rows, audio.length > 1 ? "Card " + (i + 1) : "Card", audio[i][1])
+            out.push({title: "Audio", icon: "audio-card", rows: rows, tiles: []})
+        }
+        return out
+    }
+
+    // The Hardware tab as plain text, for the Copy button
+    function hardwareReport(sections) {
+        var out = []
+        for (var i = 0; i < sections.length; ++i) {
+            var s = sections[i]
+            out.push(s.title)
+            for (var j = 0; j < s.rows.length; ++j) out.push("  " + s.rows[j].k + ": " + s.rows[j].v)
+            for (j = 0; j < s.tiles.length; ++j)
+                out.push("  - " + [s.tiles[j].title, s.tiles[j].line1, s.tiles[j].line2].filter(function(x) { return x }).join(", "))
+            out.push("")
+        }
+        return out.join("\n").replace(/\n+$/, "\n")
+    }
+
+    function copyHardware() {
+        clipboardHelper.text = root.hardwareReport(root.hwSections)
+        clipboardHelper.selectAll()
+        clipboardHelper.copy()
+        clipboardHelper.text = ""
+        root.hwCopied = true
+        hwCopiedReset.restart()
+    }
+
+    function refreshHardware() {
+        if (root.hwLoading) return
+        root.hwLoading = true
+        root.hwSeq += 1
+        hwApi.connectSource("bash " + root.codePath("hardware.sh") + " " + root.runTag(root.hwSeq))
+    }
+
     function formatBytes(bytes) {
         var n = Number(bytes)
         if (!isFinite(n) || n < 0) return "—"
@@ -2040,7 +2163,7 @@ PlasmoidItem {
     // CPU load is the busy share of the time since the previous sample (null before the second one).
     function parseSysStat(text, prev) {
         var t = String(text || "")
-        var r = {cpu: null, sample: null, memTotal: 0, memUsed: -1, swapTotal: 0, swapUsed: -1}
+        var r = {cpu: null, sample: null, memTotal: 0, memUsed: -1, swapTotal: 0, swapUsed: -1, diskSize: 0, diskUsed: -1, diskAvail: -1}
         var c = t.match(/^cpu\s+(\d+(?:\s+\d+)*)/m)
         if (c) {
             var f = c[1].split(/\s+/).map(Number)
@@ -2054,6 +2177,9 @@ PlasmoidItem {
         var mt = kb("MemTotal"), ma = kb("MemAvailable"), st = kb("SwapTotal"), sf = kb("SwapFree")
         if (mt > 0 && ma >= 0) { r.memTotal = mt; r.memUsed = Math.max(0, mt - ma) }
         if (st >= 0 && sf >= 0) { r.swapTotal = st; r.swapUsed = Math.max(0, st - sf) }
+        // df -P -B1 / : "<fs> <size> <used> <available> <use%> /" (free = available to the user, like df)
+        var d = t.match(/^\S+\s+(\d+)\s+(\d+)\s+(\d+)\s+\d+%\s+\/\s*$/m)
+        if (d) { r.diskSize = +d[1]; r.diskUsed = +d[2]; r.diskAvail = +d[3] }
         return r
     }
 
@@ -2075,11 +2201,13 @@ PlasmoidItem {
     }
 
     // One row of the system bars: label, load in percent (-1 = unknown) and the value text
-    function sysRow(i, cpu, memUsed, memTotal, swapUsed, swapTotal) {
+    function sysRow(i, cpu, memUsed, memTotal, swapUsed, swapTotal, diskUsed, diskAvail, diskSize) {
         if (i === 0) return {label: "CPU", pct: cpu, text: cpu >= 0 ? Math.round(cpu) + "%" : "—"}
         if (i === 1) return {label: "Memory", pct: memTotal > 0 ? 100 * memUsed / memTotal : -1, text: root.usageText(memUsed, memTotal)}
-        return {label: "Swap", pct: swapTotal > 0 ? 100 * swapUsed / swapTotal : -1,
+        if (i === 2) return {label: "Swap", pct: swapTotal > 0 ? 100 * swapUsed / swapTotal : -1,
                 text: swapTotal > 0 ? root.usageText(swapUsed, swapTotal) : (swapUsed >= 0 ? "no swap" : "—")}
+        // System disk (the filesystem of /): used of the disk size, the same way as memory and swap
+        return {label: "Disk", pct: diskUsed >= 0 && diskSize > 0 ? 100 * diskUsed / diskSize : -1, text: root.usageText(diskUsed, diskSize)}
     }
 
     // Run tag in a command string. Plasma5Support's DataSource keeps an entry in its "data" map for
@@ -2176,13 +2304,14 @@ PlasmoidItem {
     function reapStuckSources() {
         var now = Date.now(), next = {}
         var watched = [
-            {api: sysApi, limit: 10000}, {api: trafficApi, limit: 10000}, {api: drivesApi, limit: 20000},
+            {api: sampleApi, limit: 10000}, {api: drivesApi, limit: 20000},
             {api: uptimeApi, limit: 10000}, {api: publicApi, limit: 60000, reset: function() { root.loading = false }},
             {api: localApi, limit: 30000}, {api: routeApi, limit: 30000},
             {api: dnsApi, limit: 30000, reset: function() { root.localLoading = false }},
             {api: statusApi, limit: 60000, reset: function() { root.networkLoading = false }},
             {api: monitorApi, limit: 90000, reset: function() { root.monitorLoading = false }},
-            {api: appTrafficApi, limit: 30000, reset: function() { root.appTrafficLoading = false }}
+            {api: appTrafficApi, limit: 30000, reset: function() { root.appTrafficLoading = false }},
+            {api: hwApi, limit: 30000, reset: function() { root.hwLoading = false }}
         ]
         for (var i = 0; i < watched.length; ++i) {
             var srcs = watched[i].api.connectedSources
@@ -2200,18 +2329,30 @@ PlasmoidItem {
         root.reapSince = next
     }
 
-    function refreshSystem() {
-        if (sysApi.connectedSources.length) return
-        root.sysSeq += 1
-        sysApi.connectSource("MYIPGEO_SEQ=" + root.runTag(root.sysSeq) + " sh -c 'head -n 1 /proc/stat; grep -E \"^(MemTotal|MemAvailable|SwapTotal|SwapFree):\" /proc/meminfo'")
+    // One process every 2 s reads everything the main view polls (sample.sh, shell builtins only).
+    // The system disk is asked for every 30 s (df is the only extra process); the drives list is
+    // re-read by drives.sh only when the block devices or mounts changed, and once a minute.
+    function sampleParts(tick, showSystem, showTraffic, showDrives) {
+        return (showSystem ? "s" + (tick % 15 === 0 ? "k" : "") : "") + (showTraffic ? "t" : "") + (showDrives ? "d" : "")
     }
 
-    function refreshTraffic() {
-        // Physical adapters only (they have a device in sysfs): VPN tunnels, bridges and veth carry
-        // the same bytes a second time. Without any, every interface but lo.
-        if (trafficApi.connectedSources.length) return
-        root.trafficSeq += 1
-        trafficApi.connectSource("MYIPGEO_SEQ=" + root.runTag(root.trafficSeq) + " sh -c 'rx=0; tx=0; n=0; for d in /sys/class/net/*; do [ -e \"$d/device\" ] || continue; read r < \"$d/statistics/rx_bytes\" && read t < \"$d/statistics/tx_bytes\" || continue; rx=$((rx + r)); tx=$((tx + t)); n=$((n + 1)); done; [ $n -gt 0 ] || for d in /sys/class/net/*; do [ \"${d##*/}\" = lo ] && continue; read r < \"$d/statistics/rx_bytes\" && read t < \"$d/statistics/tx_bytes\" || continue; rx=$((rx + r)); tx=$((tx + t)); done; echo \"$rx $tx\"'")
+    function refreshSample() {
+        if (sampleApi.connectedSources.length) return   // the previous run has not finished
+        var parts = root.sampleParts(root.sampleTick, appSettings.showSystem, appSettings.showTraffic, appSettings.showDrives)
+        root.sampleTick += 1
+        if (parts === "") return
+        sampleApi.connectSource("bash " + root.codePath("sample.sh") + " " + parts + " " + root.runTag(root.sampleTick))
+    }
+
+    // "NET <rx> <tx>" and "DRV <signature>" lines of sample.sh
+    function parseSample(text) {
+        var t = String(text || "")
+        var r = {rx: -1, tx: -1, drives: null}
+        var n = t.match(/^NET (\d+) (\d+)$/m)
+        if (n) { r.rx = Number(n[1]); r.tx = Number(n[2]) }
+        var d = t.match(/^DRV (.*)$/m)
+        if (d) r.drives = d[1]
+        return r
     }
 
     Plasma5Support.DataSource {
@@ -2337,18 +2478,39 @@ PlasmoidItem {
         }
     }
     Plasma5Support.DataSource {
-        id: sysApi; engine: "executable"
+        id: sampleApi; engine: "executable"
         onNewData: function(source, data) {
-            sysApi.disconnectSource(source)
-            var r = root.parseSysStat(data.stdout, root.cpuPrev)
-            if (r.sample) root.cpuPrev = r.sample
-            if (r.cpu !== null) root.cpuPct = r.cpu
-            if (r.memUsed >= 0) { root.memTotal = r.memTotal; root.memUsed = r.memUsed }
-            if (r.swapUsed >= 0) { root.swapTotal = r.swapTotal; root.swapUsed = r.swapUsed }
+            sampleApi.disconnectSource(source)
+            if (appSettings.showSystem) {
+                var r = root.parseSysStat(data.stdout, root.cpuPrev)
+                if (r.sample) root.cpuPrev = r.sample
+                if (r.cpu !== null) root.cpuPct = r.cpu
+                if (r.memUsed >= 0) { root.memTotal = r.memTotal; root.memUsed = r.memUsed }
+                if (r.swapUsed >= 0) { root.swapTotal = r.swapTotal; root.swapUsed = r.swapUsed }
+                if (r.diskUsed >= 0) { root.diskSize = r.diskSize; root.diskUsed = r.diskUsed; root.diskAvail = r.diskAvail }
+            }
+            var s = root.parseSample(data.stdout)
+            if (s.rx >= 0 && appSettings.showTraffic) {
+                root.trafficReceived = root.formatBytes(s.rx)
+                root.trafficSent = root.formatBytes(s.tx)
+                root.trafficUpdated = Qt.formatTime(new Date(), "HH:mm:ss")
+                var cur = {rx: s.rx, tx: s.tx, t: Date.now()}
+                var rate = root.trafficRate(root.trafficPrev, cur)
+                root.trafficRxRate = rate ? rate.rx : -1
+                root.trafficTxRate = rate ? rate.tx : -1
+                root.trafficPrev = cur
+            }
+            if (s.drives !== null && s.drives !== root.drivesSignature) {
+                root.drivesSignature = s.drives
+                root.refreshDrives()
+            }
         }
     }
-    Timer { interval: 2000; repeat: true; running: appSettings.showSystem; triggeredOnStart: true; onTriggered: root.refreshSystem() }
-    Plasma5Support.DataSource { id: trafficApi; engine:"executable"; onNewData:function(source,data){trafficApi.disconnectSource(source);var p=String(data.stdout||"").trim().split(/\s+/);if(p.length>=2){root.trafficReceived=root.formatBytes(p[0]);root.trafficSent=root.formatBytes(p[1]);root.trafficUpdated=Qt.formatTime(new Date(),"HH:mm:ss");var cur={rx:Number(p[0]),tx:Number(p[1]),t:Date.now()};var r=root.trafficRate(root.trafficPrev,cur);root.trafficRxRate=r?r.rx:-1;root.trafficTxRate=r?r.tx:-1;root.trafficPrev=cur}} }
+    Timer {
+        interval: 2000; repeat: true; triggeredOnStart: true
+        running: appSettings.showSystem || appSettings.showTraffic || appSettings.showDrives
+        onTriggered: root.refreshSample()
+    }
     Plasma5Support.DataSource {
         id: drivesApi; engine: "executable"
         onNewData: function(source, data) {
@@ -2358,11 +2520,13 @@ PlasmoidItem {
             if (JSON.stringify(list) !== JSON.stringify(root.drives)) root.drives = list
         }
     }
-    Timer { interval: 3000; repeat: true; running: appSettings.showDrives; triggeredOnStart: true; onTriggered: root.refreshDrives() }
+    // Used and free space of mounted drives (tooltips) once a minute; plugging and mounting come from the sample
+    Timer { interval: 60000; repeat: true; running: appSettings.showDrives; triggeredOnStart: true; onTriggered: root.refreshDrives() }
     // A block shown again starts from a new sample: no CPU load or speed averaged over the hidden time
     Connections {
         target: appSettings
-        function onShowSystemChanged() { root.cpuPrev = null; root.cpuPct = -1 }
+        function onShowSystemChanged() { root.cpuPrev = null; root.cpuPct = -1; root.sampleTick = 0 }
+        function onShowDrivesChanged() { root.drivesSignature = "" }
         function onShowTrafficChanged() { root.trafficPrev = null; root.trafficRxRate = -1; root.trafficTxRate = -1 }
     }
     Plasma5Support.DataSource {
@@ -2391,6 +2555,18 @@ PlasmoidItem {
         onNewData: function(source, data) { bootIdApi.disconnectSource(source); root.loadAppUsage(String(data.stdout || "").trim()) }
     }
     Timer { interval: 10000; repeat: true; running: true; onTriggered: root.reapStuckSources() }
+    Plasma5Support.DataSource {
+        id: hwApi; engine: "executable"
+        onNewData: function(source, data) {
+            hwApi.disconnectSource(source)
+            root.hwLoading = false
+            var sections = root.parseHardware(data.stdout)
+            if (sections.length) { root.hwSections = sections; root.hwUpdated = Qt.formatTime(new Date(), "HH:mm") }
+        }
+    }
+    // Copying text: QML has no clipboard object, a hidden TextEdit has copy()
+    TextEdit { id: clipboardHelper; visible: false }
+    Timer { id: hwCopiedReset; interval: 2000; onTriggered: root.hwCopied = false }
     Timer { id: appUsageRetry; interval: 600000; onTriggered: root.startAppUsage(120) }
     Plasma5Support.DataSource { id: appTrafficApi; engine:"executable"; onNewData:function(source,data){
         appTrafficApi.disconnectSource(source)
@@ -2498,12 +2674,6 @@ PlasmoidItem {
     } }
     Plasma5Support.DataSource { id: monitorNotifyApi; engine:"executable"; onNewData:function(source,data){monitorNotifyApi.disconnectSource(source)} }
 
-    // Every 2 s: the totals and the current speed
-    Timer { interval:2000
- repeat:true
- running:appSettings.showTraffic
- triggeredOnStart:true
- onTriggered:root.refreshTraffic() }
     // Apps: refreshed on open, by its Refresh button and every 10 min while visible (no fast polling)
     Timer { interval:600000
  repeat:true
@@ -2521,7 +2691,7 @@ PlasmoidItem {
  repeat:true
  running:true
  onTriggered:{ root.refreshNetwork(); root.monitorWatchedDevices() } }
-    Component.onCompleted: { bootIdApi.connectSource("cat /proc/sys/kernel/random/boot_id"); root.loadWatchedDevices(); root.refreshAll(); root.refreshTraffic(); root.refreshAppTraffic(); root.checkDependencies(); root.monitorWatchedDevices(); Qt.callLater(root.fitDesktopHeight) }
+    Component.onCompleted: { bootIdApi.connectSource("cat /proc/sys/kernel/random/boot_id"); root.loadWatchedDevices(); root.refreshAll(); root.refreshAppTraffic(); root.checkDependencies(); root.monitorWatchedDevices(); Qt.callLater(root.fitDesktopHeight) }
 
     compactRepresentation: Item {
         implicitWidth: 180
@@ -2940,7 +3110,7 @@ font.pixelSize:13 }
                 }
             }
 
-            // CPU, memory and swap: a bar each, coloured by load
+            // CPU, memory, swap and the system disk: a bar each, coloured by load
             Rectangle {
                 id: systemBar
                 visible: appSettings.showSystem
@@ -2962,9 +3132,9 @@ font.pixelSize:13 }
 
                     Repeater {
                         // A fixed model: the rows stay, only their values change
-                        model: 3
+                        model: 4
                         delegate: RowLayout {
-                            readonly property var row: root.sysRow(index, root.cpuPct, root.memUsed, root.memTotal, root.swapUsed, root.swapTotal)
+                            readonly property var row: root.sysRow(index, root.cpuPct, root.memUsed, root.memTotal, root.swapUsed, root.swapTotal, root.diskUsed, root.diskAvail, root.diskSize)
                             Layout.fillWidth: true
                             spacing: 8
                             Text { text: row.label; color: root.themeText; font.pixelSize: 11; font.bold: true; Layout.preferredWidth: 52 }
@@ -3180,7 +3350,7 @@ font.pixelSize:13 }
                     Item { Layout.fillWidth: true }
                     Image { source: Qt.resolvedUrl("../images/github.svg"); sourceSize.width: 18; sourceSize.height: 18; Layout.preferredWidth: 18; Layout.preferredHeight: 18 }
                     Text { text: "GitHub"; color: root.themeLink; font.pixelSize: 13; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: Qt.openUrlExternally("https://github.com/f1devbin/my-ip-geo-plasma6") } }
-                    Text { text: "· v6.1.59"; color: root.themeText; opacity: 0.8; font.pixelSize: 11 }
+                    Text { text: "· v6.1.60"; color: root.themeText; opacity: 0.8; font.pixelSize: 11 }
                 }
             }
         }
@@ -3344,76 +3514,7 @@ font.pixelSize:13 }
     }
 
     // Settings: which blocks the main view shows (saved; the widget height follows)
-    Rectangle {
-        id: settingsPanel
-        visible: false
-        anchors.fill: parent
-        anchors.margins: 12
-        radius: 14
-        z: 100
-        color: root.alpha(root.themeBackground, 1)
-        border.width: 1
-        border.color: "#ff3030"
-
-        ColumnLayout {
-            anchors.left: parent.left
-            anchors.right: parent.right
-            anchors.top: parent.top
-            anchors.margins: 10
-            spacing: 8
-
-            RowLayout {
-                Layout.fillWidth: true
-                spacing: 8
-                Text {
-                    text: "Settings"
-                    color: root.themeText
-                    font.pixelSize: 16
-                    font.bold: true
-                    Layout.fillWidth: true
-                }
-                Controls.Button {
-                    text: "×"
-                    Layout.preferredWidth: 30
-                    Layout.preferredHeight: 30
-                    onClicked: settingsPanel.visible = false
-                }
-            }
-
-            Text {
-                text: "Main view blocks"
-                color: root.themeText
-                font.pixelSize: 13
-                font.bold: true
-                Layout.topMargin: 4
-            }
-
-            Repeater {
-                model: [
-                    {key: "showSystem", text: "System load (CPU, memory, swap)"},
-                    {key: "showTraffic", text: "Traffic (totals and current speed)"},
-                    {key: "showDrives", text: "External drives"}
-                ]
-                delegate: Controls.CheckBox {
-                    Layout.fillWidth: true
-                    checked: appSettings[modelData.key]
-                    onToggled: appSettings[modelData.key] = checked
-                    text: modelData.text
-                    font.pixelSize: 13
-                }
-            }
-
-            Text {
-                Layout.fillWidth: true
-                Layout.topMargin: 4
-                text: "The widget height follows the shown blocks and the number of connected drives."
-                color: root.themeText
-                opacity: 0.85
-                font.pixelSize: 11
-                wrapMode: Text.WordWrap
-            }
-        }
-    }
+    SettingsPanel { id: settingsPanel; root: widgetRoot }
 
     Rectangle {
         id: featurePanel
@@ -3437,7 +3538,7 @@ font.pixelSize:13 }
                 Layout.fillWidth: true
                 spacing: 8
                 Text {
-                    text: "Network tools"
+                    text: "Tools"
                     color: root.themeText
                     font.pixelSize: 16
                     font.bold: true
@@ -3514,1241 +3615,36 @@ font.pixelSize:13 }
                     }
                     contentItem: Text { text: parent.text; color: root.themeText; font.pixelSize: 10; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
                 }
+                Controls.Button {
+                    text: "Hardware"
+                    Layout.fillWidth: true
+                    onClicked: { root.toolsTab = 6; if (!root.hwSections.length) root.refreshHardware() }
+                    background: Rectangle {
+                        radius: 5
+                        color: root.toolsTab === 6 ? root.alpha(root.themeHighlight, .16) : root.alpha(root.themeBackground, .80)
+                        border.width: 1
+                        border.color: root.toolsTab === 6 ? root.themeHighlight : root.alpha(root.themeText, .10)
+                    }
+                    contentItem: Text { text: parent.text; color: root.themeText; font.pixelSize: 10; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
+                }
             }
 
             Item {
                 Layout.fillWidth: true
                 Layout.fillHeight: true
 
-                ColumnLayout {
-                    anchors.fill: parent
-                    spacing: 6
-                    visible: root.toolsTab === 0
+                ScannerTab { root: widgetRoot }
 
-                    RowLayout {
-                        Layout.fillWidth: true
-                        Text { text: "Network Scanner"; color: root.themeText; font.pixelSize: 13; font.bold: true; Layout.fillWidth: true }
-                        Text { text: root.scanLoading ? root.scanProgressText(root.scanRunCidr) : root.scanStatus; color: root.scanLoading ? root.themeHighlight : root.themeSecondary; font.pixelSize: 9 }
-                    }
-                    Text {
-                        text: "Finds every device on the network, including ones that ignore ping (they still answer ARP). A /24 takes about 10 seconds, a /21 about 20. Press the magnifier next to a device to scan its open ports."
-                        color: root.themeSecondary
-                        font.pixelSize: 10
-                        Layout.fillWidth: true
-                        wrapMode: Text.Wrap
-                    }
-                    RowLayout {
-                        Layout.fillWidth: true
-                        spacing: 5
-                        Controls.TextField {
-                            id: scanField
-                            Layout.fillWidth: true
-                            text: root.scanCidr
-                            placeholderText: "Network, e.g. 192.168.1.0/24"
-                            font.pixelSize: 10
-                            selectByMouse: true
-                            onEditingFinished: {
-                                root.scanCidr = text.trim()
-                                root.scanCidrUserEdited = true
-                            }
-                            onAccepted: {
-                                root.scanCidr = text.trim()
-                                root.scanCidrUserEdited = true
-                                root.runNetworkScan()
-                            }
-                        }
-                        Controls.Button {
-                            text: root.scanLoading ? "Scanning…" : "Scan"
-                            enabled: !root.scanLoading && root.scanCidr !== "" && root.missingDependencies.indexOf("iputils-ping") === -1
-                            onClicked: root.runNetworkScan()
-                        }
-                    }
-                    Rectangle {
-                        id: scanBar
-                        visible: root.scanLoading
-                        Layout.fillWidth: true
-                        Layout.preferredHeight: 3
-                        radius: 1.5
-                        color: root.alpha(root.themeText, .08)
-                        clip: true
-                        Rectangle {
-                            id: scanBarFill
-                            width: scanBar.width * 0.3
-                            height: scanBar.height
-                            radius: 1.5
-                            color: root.themeHighlight
-                            NumberAnimation on x {
-                                from: -scanBarFill.width
-                                to: scanBar.width
-                                duration: 1400
-                                loops: Animation.Infinite
-                                running: scanBar.visible
-                            }
-                        }
-                    }
-                    RowLayout {
-                        visible: root.missingDependencies !== ""
-                        Layout.fillWidth: true
-                        spacing: 5
-                        Text {
-                            text: "Missing: " + root.missingDependencies
-                            color: root.themeNegative
-                            font.pixelSize: 10
-                            Layout.fillWidth: true
-                            wrapMode: Text.Wrap
-                        }
-                        Controls.Button {
-                            text: "Check"
-                            enabled: !root.dependenciesLoading
-                            onClicked: root.checkDependencies()
-                        }
-                    }
-                    TextEdit {
-                        visible: root.installCommand !== ""
-                        Layout.fillWidth: true
-                        text: root.installCommand
-                        color: root.themeNegative
-                        font.pixelSize: 10
-                        readOnly: true
-                        selectByMouse: true
-                        selectByKeyboard: true
-                        cursorVisible: false
-                        wrapMode: TextEdit.Wrap
-                        Layout.preferredHeight: Math.max(18, contentHeight)
-                    }
+                DiagnosticsTab { root: widgetRoot }
 
-                    Rectangle {
-                        Layout.fillWidth: true
-                        Layout.preferredHeight: 26
-                        // as wide as the device rows, which leave room for the scroll bar
-                        Layout.rightMargin: scanFlick.barSpace
-                        radius: 6
-                        color: root.alpha(root.themeText, .035)
-                        border.width: 1
-                        border.color: root.alpha(root.themeText, .12)
-                        RowLayout {
-                            anchors.fill: parent
-                            anchors.leftMargin: 8
-                            anchors.rightMargin: 5
-                            spacing: 6
-                            Text { Layout.fillWidth: true; text: "Device"; color: root.themeText; font.pixelSize: 10; font.bold: true }
-                            Text { Layout.preferredWidth: 112; text: "MAC address"; color: root.themeText; font.pixelSize: 10; font.bold: true }
-                            Text { Layout.preferredWidth: 44; text: "Ports"; color: root.themeText; font.pixelSize: 10; font.bold: true; horizontalAlignment: Text.AlignHCenter }
-                            Text { Layout.preferredWidth: 44; text: "Monitor"; color: root.themeText; font.pixelSize: 10; font.bold: true; horizontalAlignment: Text.AlignHCenter }
-                        }
-                    }
+                SpeedTab { root: widgetRoot }
 
-                    Flickable {
-                        id: scanFlick
-                        // room for the scroll bar while the list is longer than the view
-                        readonly property real barSpace: contentHeight > height + 1 ? scanScroll.width + 4 : 0
-                        Layout.fillWidth: true
-                        Layout.fillHeight: true
-                        clip: true
-                        contentWidth: width
-                        contentHeight: scanHostColumn.height
-                        interactive: contentHeight > height
-                        boundsBehavior: Flickable.StopAtBounds
-                        Controls.ScrollBar.vertical: Controls.ScrollBar {
-                            id: scanScroll
-                            policy: Controls.ScrollBar.AlwaysOn
-                            visible: scanFlick.contentHeight > scanFlick.height + 1
-                        }
+                AppsTab { root: widgetRoot }
 
-                        Column {
-                            id: scanHostColumn
-                            width: parent.width - scanFlick.barSpace
-                            spacing: 3
+                MonitorTab { root: widgetRoot }
 
-                            Repeater {
-                                model: root.scanHosts
-                                delegate: Rectangle {
-                                    id: hostRow
-                                    readonly property string ipKey: modelData.ip
-                                    readonly property string macAddr: modelData.mac
-                                    readonly property bool expanded: root.scanExpanded[ipKey] === true
-                                    readonly property var scan: root.portScans[ipKey] || null
-                                    readonly property string prange: scan ? scan.range : "1-65535"
-                                    readonly property string pstate: scan ? scan.state : "idle"
-                                    // "Router" / "This device" and the reverse DNS name, when known
-                                    readonly property string note: {
-                                        var parts = []
-                                        var label = root.scanLabel(modelData.ip)
-                                        if (label) parts.push(label)
-                                        var name = root.scanNames[modelData.ip]
-                                        if (name) parts.push(name)
-                                        return parts.join(" · ")
-                                    }
-                                    width: scanHostColumn.width
-                                    height: hostBody.implicitHeight
-                                    radius: 6
-                                    color: root.alpha(root.themeText, hostRow.expanded ? .07 : .045)
-                                    border.width: 1
-                                    border.color: root.alpha(root.themeText, hostRow.expanded ? .16 : .08)
-                                    clip: true
-
-                                    Column {
-                                        id: hostBody
-                                        width: parent.width
-
-                                        // Header row: click anywhere (except the buttons) to open the port scan
-                                        Item {
-                                            width: parent.width
-                                            height: 38
-                                            MouseArea {
-                                                anchors.fill: parent
-                                                cursorShape: Qt.PointingHandCursor
-                                                onClicked: root.togglePortExpand(hostRow.ipKey)
-                                            }
-                                            RowLayout {
-                                                anchors.fill: parent
-                                                anchors.leftMargin: 8
-                                                anchors.rightMargin: 5
-                                                spacing: 6
-                                                Rectangle {
-                                                    Layout.preferredWidth: 8
-                                                    Layout.preferredHeight: 8
-                                                    radius: 4
-                                                    color: modelData.via === "ping" ? root.themePositive : "#e0a030"
-                                                }
-                                                ColumnLayout {
-                                                    Layout.fillWidth: true
-                                                    spacing: 0
-                                                    TextEdit {
-                                                        Layout.fillWidth: true
-                                                        text: modelData.ip
-                                                        color: root.themeText
-                                                        font.pixelSize: 10
-                                                        readOnly: true
-                                                        selectByMouse: true
-                                                        selectByKeyboard: true
-                                                        cursorVisible: false
-                                                    }
-                                                    Text {
-                                                        visible: hostRow.note !== ""
-                                                        Layout.fillWidth: true
-                                                        text: hostRow.note
-                                                        color: root.themeLink
-                                                        font.pixelSize: 10
-                                                        elide: Text.ElideRight
-                                                    }
-                                                }
-                                                TextEdit {
-                                                    Layout.preferredWidth: 112
-                                                    text: modelData.mac
-                                                    color: root.themeText
-                                                    font.pixelSize: 10
-                                                    readOnly: true
-                                                    selectByMouse: true
-                                                    selectByKeyboard: true
-                                                    cursorVisible: false
-                                                }
-                                                // Port scan: opens / closes the panel under the row
-                                                Item {
-                                                    Layout.preferredWidth: 44
-                                                    Layout.preferredHeight: 38
-                                                    Controls.Button {
-                                                        id: portsButton
-                                                        anchors.centerIn: parent
-                                                        width: 30
-                                                        height: 26
-                                                        icon.name: "edit-find"
-                                                        icon.width: 16
-                                                        icon.height: 16
-                                                        onClicked: root.togglePortExpand(hostRow.ipKey)
-                                                        Controls.ToolTip.visible: hovered
-                                                        Controls.ToolTip.delay: 500
-                                                        Controls.ToolTip.text: hostRow.expanded ? "Hide port scan" : "Scan ports"
-                                                    }
-                                                    // Accent frame while the panel of this device is open (Breeze shows no checked state here)
-                                                    Rectangle {
-                                                        visible: hostRow.expanded
-                                                        anchors.fill: portsButton
-                                                        anchors.margins: -2
-                                                        radius: 6
-                                                        color: "transparent"
-                                                        border.width: 2
-                                                        border.color: root.themeHighlight
-                                                    }
-                                                }
-                                                Item {
-                                                    Layout.preferredWidth: 44
-                                                    Layout.preferredHeight: 38
-                                                    Controls.Button {
-                                                        id: watchButton
-                                                        anchors.centerIn: parent
-                                                        width: 30
-                                                        height: 26
-                                                        Controls.ToolTip.visible: hovered
-                                                        Controls.ToolTip.delay: 500
-                                                        Controls.ToolTip.text: watchButton.text === "+" ? "Watch in Monitor" : "Stop watching"
-                                                        text: {
-                                                            var watching = false
-                                                            for (var wi = 0; wi < root.watchedDevices.length; ++wi) {
-                                                                if (root.watchedDevices[wi].ip === modelData.ip) { watching = true; break }
-                                                            }
-                                                            return watching ? "\u2212" : "+"
-                                                        }
-                                                        onClicked: root.toggleWatchedDevice(modelData.ip, modelData.mac)
-                                                    }
-                                                }
-                                            }
-                                        }
-
-                                        // Port scan panel
-                                        Column {
-                                            visible: hostRow.expanded
-                                            x: 8
-                                            width: parent.width - 16
-                                            spacing: 6
-                                            bottomPadding: 8
-
-                                            Rectangle { width: parent.width; height: 1; color: root.alpha(root.themeText, .08) }
-
-                                            Text { text: "Scan TCP ports on " + hostRow.ipKey; color: root.themeText; font.pixelSize: 10; font.bold: true }
-
-                                            // Port range stretches with the widget; the magnifier Scan button stays at the right edge
-                                            RowLayout {
-                                                width: parent.width
-                                                spacing: 8
-                                                Controls.TextField {
-                                                    id: rangeField
-                                                    Layout.fillWidth: true
-                                                    Layout.minimumWidth: 80
-                                                    text: hostRow.prange
-                                                    placeholderText: "e.g. 8000-9000"
-                                                    font.pixelSize: 11
-                                                    selectByMouse: true
-                                                    onEditingFinished: root.setPortRange(hostRow.ipKey, text.trim())
-                                                    onAccepted: { root.setPortRange(hostRow.ipKey, text.trim()); root.runPortScan(hostRow.ipKey) }
-                                                }
-                                                Controls.Button {
-                                                    id: scanPortsButton
-                                                    Layout.preferredWidth: 36
-                                                    Layout.preferredHeight: rangeField.implicitHeight
-                                                    display: Controls.AbstractButton.IconOnly
-                                                    text: "Start scan"
-                                                    icon.name: "edit-find"
-                                                    icon.width: 16
-                                                    icon.height: 16
-                                                    enabled: root.portScanIp === ""
-                                                    Controls.ToolTip.visible: hovered
-                                                    Controls.ToolTip.delay: 500
-                                                    Controls.ToolTip.text: "Start scan"
-                                                    onClicked: { root.setPortRange(hostRow.ipKey, rangeField.text.trim()); root.runPortScan(hostRow.ipKey) }
-                                                }
-                                            }
-                                            // Live state / result
-                                            Text {
-                                                width: parent.width
-                                                wrapMode: Text.Wrap
-                                                text: hostRow.pstate === "error" ? hostRow.scan.error
-                                                    : hostRow.pstate === "running" ? "Checking " + root.rangeCount(hostRow.prange) + " ports\u2026"
-                                                    : hostRow.pstate === "done" ? ((hostRow.scan.ports.length > 0
-                                                        ? hostRow.scan.ports.length + " open \u00b7 " + hostRow.scan.scanned + " checked"
-                                                        : "No open ports \u00b7 " + hostRow.scan.scanned + " checked")
-                                                        + (hostRow.scan.secs > 0 ? " \u00b7 " + hostRow.scan.secs.toFixed(1) + " s" : ""))
-                                                    : "Plain TCP connect, no root needed"
-                                                color: hostRow.pstate === "error" ? root.themeNegative
-                                                    : hostRow.pstate === "running" ? root.themeHighlight
-                                                    : (hostRow.pstate === "done" && hostRow.scan.ports.length > 0) ? root.themePositive
-                                                    : root.themeSecondary
-                                                font.pixelSize: 10
-                                            }
-                                            // Indeterminate progress while a (possibly large) scan runs
-                                            Rectangle {
-                                                id: psBar
-                                                visible: hostRow.pstate === "running"
-                                                width: parent.width
-                                                height: 3
-                                                radius: 1.5
-                                                color: root.alpha(root.themeText, .08)
-                                                clip: true
-                                                Rectangle {
-                                                    id: psFill
-                                                    width: psBar.width * 0.3
-                                                    height: psBar.height
-                                                    radius: 1.5
-                                                    color: root.themeHighlight
-                                                    NumberAnimation on x {
-                                                        from: -psFill.width
-                                                        to: psBar.width
-                                                        duration: 1200
-                                                        loops: Animation.Infinite
-                                                        // only while seen: a running animation makes the window redraw
-                                                        running: hostRow.pstate === "running" && psBar.visible
-                                                    }
-                                                }
-                                            }
-                                            // Open ports
-                                            Flow {
-                                                width: parent.width
-                                                spacing: 5
-                                                Repeater {
-                                                    model: (hostRow.scan && hostRow.pstate === "done") ? hostRow.scan.ports : []
-                                                    delegate: Rectangle {
-                                                        radius: 4
-                                                        height: 20
-                                                        width: portChip.width + 12
-                                                        color: root.alpha(root.themePositive, .16)
-                                                        border.width: 1
-                                                        border.color: root.alpha(root.themePositive, .35)
-                                                        Row {
-                                                            id: portChip
-                                                            anchors.centerIn: parent
-                                                            spacing: 4
-                                                            Text { text: modelData.port; color: root.themeText; font.pixelSize: 10; font.bold: true }
-                                                            Text { visible: modelData.service !== ""; text: modelData.service; color: root.themeSecondary; font.pixelSize: 10 }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    Row {
-                        visible: root.scanHosts.length > 0
-                        spacing: 12
-                        Row {
-                            spacing: 4
-                            Rectangle { width: 7; height: 7; radius: 3.5; color: root.themePositive; anchors.verticalCenter: parent.verticalCenter }
-                            Text { text: "answers ping"; color: root.themeText; font.pixelSize: 9 }
-                        }
-                        Row {
-                            spacing: 4
-                            Rectangle { width: 7; height: 7; radius: 3.5; color: "#e0a030"; anchors.verticalCenter: parent.verticalCenter }
-                            Text { text: "ignores ping, found via ARP"; color: root.themeText; font.pixelSize: 9 }
-                        }
-                    }
-                }
-
-                ColumnLayout {
-                    anchors.fill: parent
-                    spacing: 7
-                    visible: root.toolsTab === 1
-
-                    RowLayout {
-                        Layout.fillWidth: true
-                        Text { text: "Network Diagnostics"; color: root.themeText; font.pixelSize: 13; font.bold: true; Layout.fillWidth: true }
-                        Text {
-                            text: root.diagRunning ? "Checking…" : (root.diagUpdated !== "" ? "Checked " + root.diagUpdated : "")
-                            color: root.diagRunning ? root.themeHighlight : root.themeSecondary
-                            font.pixelSize: 10
-                        }
-                    }
-
-                    // Verdict: the first broken link of the chain, a warning or "Everything works"
-                    Rectangle {
-                        id: diagBanner
-                        readonly property var verdict: root.diagView.verdict
-                        readonly property color tint: root.diagTint(verdict.status)
-                        Layout.fillWidth: true
-                        Layout.preferredHeight: Math.max(50, diagBannerText.implicitHeight + 18)
-                        radius: 10
-                        color: root.alpha(tint, 0.13)
-                        border.width: 1
-                        border.color: root.alpha(tint, 0.6)
-                        DiagIcon {
-                            id: diagBannerIcon
-                            status: diagBanner.verdict.status
-                            size: 26
-                            anchors.left: parent.left
-                            anchors.leftMargin: 11
-                            anchors.verticalCenter: parent.verticalCenter
-                        }
-                        Column {
-                            id: diagBannerText
-                            anchors.left: diagBannerIcon.right
-                            anchors.leftMargin: 11
-                            anchors.right: parent.right
-                            anchors.rightMargin: 10
-                            anchors.verticalCenter: parent.verticalCenter
-                            spacing: 2
-                            Text { width: parent.width; text: diagBanner.verdict.title; color: root.themeText; font.pixelSize: 13; font.bold: true; wrapMode: Text.Wrap }
-                            Text { width: parent.width; visible: text !== ""; text: diagBanner.verdict.hint; color: root.alpha(root.themeText, 0.88); font.pixelSize: 10; wrapMode: Text.Wrap }
-                        }
-                    }
-
-                    Flickable {
-                        id: diagFlick
-                        Layout.fillWidth: true
-                        Layout.fillHeight: true
-                        clip: true
-                        contentWidth: width
-                        contentHeight: diagColumn.height
-                        interactive: contentHeight > height
-                        boundsBehavior: Flickable.StopAtBounds
-                        // Details and route are below the steps: a visible bar shows there is more
-                        Controls.ScrollBar.vertical: Controls.ScrollBar {
-                            id: diagScroll
-                            policy: Controls.ScrollBar.AlwaysOn
-                            visible: diagFlick.contentHeight > diagFlick.height + 1
-                        }
-                        Column {
-                            id: diagColumn
-                            // room for the style's own scroll bar (Breeze's is wider than 10 px), only while it is shown
-                            width: parent.width - (diagFlick.contentHeight > diagFlick.height + 1 ? diagScroll.width + 4 : 0)
-                            spacing: 8
-
-                            // The chain: connection -> router -> DNS -> internet -> websites
-                            Column {
-                                width: parent.width
-                                Repeater {
-                                    model: 5
-                                    delegate: Item {
-                                        id: diagStep
-                                        readonly property var step: root.diagView.steps[index]
-                                        width: diagColumn.width
-                                        height: diagStepText.implicitHeight + 10
-                                        Rectangle {
-                                            visible: index < 4
-                                            x: 10
-                                            y: 22
-                                            width: 2
-                                            height: parent.height - 18
-                                            radius: 1
-                                            color: root.alpha(root.themeText, 0.16)
-                                        }
-                                        DiagIcon { x: 2; y: 2; size: 18; status: diagStep.step.status }
-                                        Column {
-                                            id: diagStepText
-                                            x: 30
-                                            y: 2
-                                            width: parent.width - 30
-                                            spacing: 1
-                                            Item {
-                                                width: parent.width
-                                                height: 18
-                                                Text { anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter; text: diagStep.step.title; color: root.themeText; font.pixelSize: 11; font.bold: true }
-                                                Text {
-                                                    anchors.right: parent.right
-                                                    anchors.verticalCenter: parent.verticalCenter
-                                                    text: diagStep.step.value
-                                                    color: diagStep.step.status === "warn" || diagStep.step.status === "fail" ? root.diagTint(diagStep.step.status) : root.themeText
-                                                    font.pixelSize: 11
-                                                    font.bold: true
-                                                }
-                                            }
-                                            TextEdit {
-                                                width: parent.width
-                                                visible: text !== ""
-                                                text: diagStep.step.detail
-                                                color: root.alpha(root.themeText, 0.85)
-                                                font.pixelSize: 10
-                                                wrapMode: TextEdit.Wrap
-                                                readOnly: true
-                                                selectByMouse: true
-                                                selectByKeyboard: true
-                                                cursorVisible: false
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-
-                            // Details: public IP, IPv6, VPN, path MTU
-                            GridLayout {
-                                width: parent.width
-                                columns: 2
-                                rowSpacing: 6
-                                columnSpacing: 6
-                                Repeater {
-                                    model: 4
-                                    delegate: Rectangle {
-                                        id: diagTile
-                                        readonly property var tile: root.diagView.tiles[index]
-                                        Layout.fillWidth: true
-                                        Layout.preferredWidth: 1
-                                        Layout.fillHeight: true
-                                        Layout.preferredHeight: diagTileText.implicitHeight + 14
-                                        radius: 8
-                                        color: root.alpha(root.themeText, 0.045)
-                                        border.width: 1
-                                        border.color: root.alpha(root.themeText, 0.08)
-                                        Column {
-                                            id: diagTileText
-                                            x: 9
-                                            y: 7
-                                            width: parent.width - 18
-                                            spacing: 2
-                                            Row {
-                                                spacing: 5
-                                                Rectangle { width: 7; height: 7; radius: 3.5; anchors.verticalCenter: parent.verticalCenter; color: root.diagTint(diagTile.tile.status) }
-                                                Text { text: diagTile.tile.title; color: root.alpha(root.themeText, 0.85); font.pixelSize: 10 }
-                                            }
-                                            TextEdit {
-                                                width: parent.width
-                                                text: diagTile.tile.value
-                                                color: root.themeText
-                                                font.pixelSize: 11
-                                                font.bold: true
-                                                wrapMode: TextEdit.WrapAnywhere
-                                                readOnly: true
-                                                selectByMouse: true
-                                                selectByKeyboard: true
-                                                cursorVisible: false
-                                            }
-                                            TextEdit {
-                                                width: parent.width
-                                                visible: text !== ""
-                                                text: diagTile.tile.detail
-                                                color: root.alpha(root.themeText, 0.85)
-                                                font.pixelSize: 10
-                                                wrapMode: TextEdit.Wrap
-                                                readOnly: true
-                                                selectByMouse: true
-                                                selectByKeyboard: true
-                                                cursorVisible: false
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-
-                            // Routers on the way to 1.1.1.1
-                            Column {
-                                width: parent.width
-                                visible: root.diagView.route.length > 0
-                                spacing: 2
-                                Text { text: "Route to 1.1.1.1"; color: root.themeText; font.pixelSize: 11; font.bold: true; bottomPadding: 2 }
-                                Repeater {
-                                    model: root.diagView.route
-                                    delegate: Rectangle {
-                                        width: diagColumn.width
-                                        height: 22
-                                        radius: 5
-                                        color: index % 2 ? "transparent" : root.alpha(root.themeText, 0.035)
-                                        RowLayout {
-                                            anchors.fill: parent
-                                            anchors.leftMargin: 6
-                                            anchors.rightMargin: 8
-                                            spacing: 8
-                                            Text { text: modelData.ttl; color: root.themeText; font.pixelSize: 10; font.bold: true; Layout.preferredWidth: 16; horizontalAlignment: Text.AlignRight }
-                                            TextEdit {
-                                                text: modelData.ip === "*" ? "no answer" : modelData.ip
-                                                color: modelData.ip === "*" ? root.alpha(root.themeText, 0.75) : root.themeText
-                                                font.pixelSize: 10
-                                                readOnly: true
-                                                selectByMouse: true
-                                                selectByKeyboard: true
-                                                cursorVisible: false
-                                            }
-                                            Text { text: modelData.name; color: root.themeLink; font.pixelSize: 10; elide: Text.ElideRight; Layout.fillWidth: true }
-                                            Text {
-                                                text: modelData.reached === 2 ? "unreachable" : (modelData.rtt >= 0 ? root.fmtMs(modelData.rtt) : "—")
-                                                color: modelData.reached === 2 ? "#ff4040" : root.themeText
-                                                font.pixelSize: 10
-                                                font.bold: modelData.reached === 1
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    Controls.Button {
-                        text: root.diagRunning ? "Checking…" : (root.diagFinished > 0 ? "Run again" : "Run diagnostics")
-                        enabled: !root.diagRunning
-                        Layout.fillWidth: true
-                        Layout.preferredHeight: 32
-                        onClicked: root.runDiagnostics()
-                    }
-                }
-
-                ColumnLayout {
-                    anchors.fill: parent
-                    spacing: 7
-                    visible: root.toolsTab === 3
-
-                    RowLayout {
-                        Layout.fillWidth: true
-                        Text { text: "Speed Test"; color: root.themeText; font.pixelSize: 13; font.bold: true; Layout.fillWidth: true }
-                        Text {
-                            text: root.speedLoading || root.speedUpdated === "" ? (root.speedStatus !== "" ? root.speedStatus : "Cloudflare · IPv4") : root.speedStatus + " · " + root.speedUpdated
-                            color: root.speedPhase === "error" ? root.themeNegative : (root.speedLoading ? root.themeHighlight : root.themeSecondary)
-                            font.pixelSize: 9
-                        }
-                    }
-
-                    Item {
-                        id: speedGauge
-                        Layout.fillWidth: true
-                        Layout.fillHeight: true
-                        Layout.minimumHeight: 120
-                        readonly property bool transfer: root.speedPhase === "download" || root.speedPhase === "upload"
-                        readonly property color accent: root.speedPhase === "upload" ? "#ff4040" : (root.speedPhase === "ping" ? "#35d07f" : "#69a9ff")
-                        readonly property real radius: Math.max(40, Math.min((width - 24) / 2, (height - 14) / 1.72))
-                        // Centred in a tall panel instead of leaving all the free space under the tiles
-                        readonly property real centerY: Math.max(0, (height - radius * 1.72 - 14) / 2) + radius + 9
-                        property real shown: transfer ? root.speedLiveMbps : (root.speedPhase === "done" ? Math.max(0, root.speedDownMbps) : 0)
-                        property real spin: 0
-                        Behavior on shown { NumberAnimation { duration: 450; easing.type: Easing.OutCubic } }
-                        NumberAnimation on spin { from: 0; to: 1; duration: 1100; loops: Animation.Infinite; running: root.speedPhase === "ping" && speedGauge.visible }
-                        onShownChanged: gaugeCanvas.requestPaint()
-                        onSpinChanged: gaugeCanvas.requestPaint()
-                        onAccentChanged: gaugeCanvas.requestPaint()
-                        onWidthChanged: gaugeCanvas.requestPaint()
-                        onHeightChanged: gaugeCanvas.requestPaint()
-                        Connections { target: root; function onSpeedPhaseChanged() { gaugeCanvas.requestPaint() } }
-
-                        Canvas {
-                            id: gaugeCanvas
-                            anchors.fill: parent
-                            onPaint: {
-                                var ctx = getContext("2d")
-                                ctx.reset()
-                                var r = speedGauge.radius
-                                var cx = width / 2
-                                var cy = speedGauge.centerY
-                                var start = 0.75 * Math.PI
-                                var sweep = 1.5 * Math.PI
-                                ctx.lineCap = "round"
-                                ctx.lineWidth = 10
-                                ctx.strokeStyle = root.cssColor(root.themeText, 0.10)
-                                ctx.beginPath()
-                                ctx.arc(cx, cy, r, start, start + sweep, false)
-                                ctx.stroke()
-                                ctx.strokeStyle = root.cssColor(speedGauge.accent, 1)
-                                if (root.speedPhase === "ping") {
-                                    var seg = 0.22 * sweep
-                                    var a = start + (sweep - seg) * speedGauge.spin
-                                    ctx.beginPath()
-                                    ctx.arc(cx, cy, r, a, a + seg, false)
-                                    ctx.stroke()
-                                } else {
-                                    var f = root.gaugeFraction(speedGauge.shown)
-                                    if (f > 0.003) {
-                                        ctx.beginPath()
-                                        ctx.arc(cx, cy, r, start, start + sweep * f, false)
-                                        ctx.stroke()
-                                    }
-                                }
-                                ctx.fillStyle = root.cssColor(root.themeText, 0.65)
-                                ctx.font = "10px sans-serif"
-                                ctx.textAlign = "center"
-                                ctx.textBaseline = "middle"
-                                var marks = [0, 10, 50, 100, 250, 500, 1000]
-                                for (var i = 0; i < marks.length; ++i) {
-                                    var ang = start + sweep * root.gaugeFraction(marks[i])
-                                    var lr = r - 21
-                                    ctx.fillText(marks[i] === 1000 ? "1G" : String(marks[i]), cx + lr * Math.cos(ang), cy + lr * Math.sin(ang))
-                                }
-                            }
-                        }
-
-                        Column {
-                            anchors.horizontalCenter: parent.horizontalCenter
-                            y: speedGauge.centerY - height / 2 + 4
-                            spacing: 0
-                            Text {
-                                anchors.horizontalCenter: parent.horizontalCenter
-                                text: root.speedPhase === "ping" ? (root.speedPingMs >= 0 ? String(Math.round(root.speedPingMs)) : "…")
-                                    : (speedGauge.transfer || root.speedPhase === "done" ? root.formatSpeed(speedGauge.shown) : "—")
-                                color: root.themeText
-                                font.pixelSize: Math.round(Math.max(22, speedGauge.radius * 0.40))
-                                font.bold: true
-                            }
-                            Text {
-                                anchors.horizontalCenter: parent.horizontalCenter
-                                text: root.speedPhase === "ping" ? "ms" : "Mbps"
-                                color: root.themeText
-                                font.pixelSize: 10
-                            }
-                            Text {
-                                anchors.horizontalCenter: parent.horizontalCenter
-                                text: root.speedPhase === "ping" ? "Ping" : (root.speedPhase === "upload" ? "Upload"
-                                    : (root.speedPhase === "download" || root.speedPhase === "done" ? "Download" : (root.speedPhase === "error" ? "Failed" : "Ready")))
-                                color: root.speedPhase === "error" ? root.themeNegative : speedGauge.accent
-                                font.pixelSize: 10
-                                font.bold: true
-                            }
-                        }
-                    }
-
-                    RowLayout {
-                        Layout.fillWidth: true
-                        spacing: 6
-                        Repeater {
-                            model: [
-                                {key: "ping", title: "Ping", tint: "#35d07f", icon: ""},
-                                {key: "download", title: "Download", tint: "#69a9ff", icon: "../images/arrow-down.svg"},
-                                {key: "upload", title: "Upload", tint: "#ff4040", icon: "../images/arrow-up.svg"}
-                            ]
-                            delegate: Rectangle {
-                                readonly property bool active: root.speedPhase === modelData.key
-                                readonly property color tint: modelData.tint
-                                readonly property real result: modelData.key === "ping" ? root.speedPingMs : (modelData.key === "download" ? root.speedDownMbps : root.speedUpMbps)
-                                Layout.fillWidth: true
-                                Layout.preferredHeight: 60
-                                radius: 10
-                                color: active ? root.alpha(tint, .10) : root.alpha(root.themeText, .045)
-                                border.width: active ? 1.5 : 1
-                                border.color: active ? tint : root.alpha(root.themeText, .08)
-                                ColumnLayout {
-                                    anchors.fill: parent
-                                    anchors.leftMargin: 9
-                                    anchors.rightMargin: 6
-                                    anchors.topMargin: 6
-                                    anchors.bottomMargin: 6
-                                    spacing: 1
-                                    Row {
-                                        spacing: 5
-                                        Image {
-                                            visible: modelData.icon !== ""
-                                            source: modelData.icon !== "" ? Qt.resolvedUrl(modelData.icon) : ""
-                                            sourceSize.width: 9
-                                            sourceSize.height: 11
-                                            anchors.verticalCenter: parent.verticalCenter
-                                        }
-                                        Rectangle {
-                                            visible: modelData.icon === ""
-                                            width: 8
-                                            height: 8
-                                            radius: 4
-                                            color: tint
-                                            anchors.verticalCenter: parent.verticalCenter
-                                        }
-                                        Text { text: modelData.title; color: root.themeText; font.pixelSize: 10 }
-                                    }
-                                    Row {
-                                        spacing: 3
-                                        Text {
-                                            id: tileValue
-                                            text: modelData.key === "ping"
-                                                ? (result >= 0 ? String(Math.round(result)) : (active ? "…" : "—"))
-                                                : (result >= 0 ? root.formatSpeed(result) : (active ? root.formatSpeed(root.speedLiveMbps) : "—"))
-                                            color: root.themeText
-                                            font.pixelSize: 17
-                                            font.bold: true
-                                        }
-                                        Text {
-                                            text: modelData.key === "ping" ? "ms" : "Mbps"
-                                            color: root.themeText
-                                            font.pixelSize: 10
-                                            anchors.baseline: tileValue.baseline
-                                        }
-                                    }
-                                    Text {
-                                        text: modelData.key === "ping" && root.speedJitterMs >= 0 ? "jitter " + root.speedJitterMs.toFixed(1) + " ms" : ""
-                                        color: root.themeText
-                                        font.pixelSize: 9
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    RowLayout {
-                        Layout.fillWidth: true
-                        Text {
-                            text: root.speedServer !== "" ? "Server: Cloudflare " + root.speedServer : "Server: Cloudflare"
-                            color: root.themeSecondary
-                            font.pixelSize: 9
-                            Layout.fillWidth: true
-                        }
-                        Text { text: "IPv4 · 4 streams"; color: root.themeSecondary; font.pixelSize: 9 }
-                    }
-
-                    Controls.Button {
-                        id: speedStartButton
-                        text: root.speedLoading ? "Testing…" : (root.speedPhase === "done" || root.speedPhase === "error" ? "Run again" : "Start test")
-                        enabled: !root.speedLoading
-                        Layout.fillWidth: true
-                        Layout.preferredHeight: 34
-                        onClicked: root.runSpeedTest()
-                        background: Rectangle {
-                            radius: 6
-                            color: speedStartButton.down ? root.alpha(root.themeHighlight, .20) : (speedStartButton.hovered ? root.alpha(root.themeHighlight, .12) : root.alpha(root.themeBackground, .92))
-                            border.width: 1
-                            border.color: speedStartButton.enabled ? "#ff3030" : root.alpha(root.themeText, .15)
-                        }
-                        contentItem: Text {
-                            text: speedStartButton.text
-                            color: speedStartButton.enabled ? root.themeText : root.themeSecondary
-                            font.pixelSize: 11
-                            font.bold: true
-                            horizontalAlignment: Text.AlignHCenter
-                            verticalAlignment: Text.AlignVCenter
-                        }
-                    }
-                }
-
-                ColumnLayout {
-                    anchors.fill: parent
-                    spacing: 7
-                    visible: root.toolsTab === 4
-
-                    RowLayout {
-                        Layout.fillWidth: true
-                        Text { text: "Network Apps"; color: root.themeText; font.pixelSize: 13; font.bold: true; Layout.fillWidth: true }
-                        Text { text: root.appTrafficLoading ? "Reading…" : root.appTrafficStatus; color: root.appTrafficLoading ? root.themeHighlight : root.themeSecondary; font.pixelSize: 9 }
-                    }
-                    // Period of the ranking
-                    RowLayout {
-                        Layout.fillWidth: true
-                        spacing: 5
-                        Repeater {
-                            model: [{key: "hour", title: "Last hour"}, {key: "day", title: "24 hours"}, {key: "boot", title: "Since boot"}]
-                            delegate: Controls.Button {
-                                id: periodButton
-                                readonly property bool current: root.appPeriod === modelData.key
-                                Layout.fillWidth: true
-                                Layout.preferredWidth: 1    // equal widths, also when the current one is bold
-                                Layout.preferredHeight: 28
-                                text: modelData.title
-                                onClicked: root.setAppPeriod(modelData.key)
-                                background: Rectangle {
-                                    radius: 5
-                                    color: periodButton.current ? root.alpha(root.themeHighlight, .18) : root.alpha(root.themeBackground, .80)
-                                    border.width: 1
-                                    border.color: periodButton.current ? root.themeHighlight : root.alpha(root.themeText, .12)
-                                }
-                                contentItem: Text {
-                                    text: periodButton.text
-                                    color: root.themeText
-                                    font.pixelSize: 10
-                                    font.bold: periodButton.current
-                                    horizontalAlignment: Text.AlignHCenter
-                                    verticalAlignment: Text.AlignVCenter
-                                }
-                            }
-                        }
-                    }
-                    Text {
-                        text: root.appPeriodSummary
-                        color: root.themeText
-                        font.pixelSize: 10
-                        Layout.fillWidth: true
-                        wrapMode: Text.Wrap
-                    }
-                    Flickable {
-                        id: appFlick
-                        Layout.fillWidth: true
-                        Layout.fillHeight: true
-                        clip: true
-                        contentWidth: width
-                        contentHeight: appTrafficColumn.height
-                        interactive: contentHeight > height
-                        boundsBehavior: Flickable.StopAtBounds
-                        Controls.ScrollBar.vertical: Controls.ScrollBar {
-                            id: appScroll
-                            policy: Controls.ScrollBar.AlwaysOn
-                            visible: appFlick.contentHeight > appFlick.height + 1
-                        }
-                        Column {
-                            id: appTrafficColumn
-                            width: parent.width - (appFlick.contentHeight > appFlick.height + 1 ? appScroll.width + 4 : 0)
-                            spacing: 4
-                            Repeater {
-                                model: root.appTraffic
-                                delegate: Rectangle {
-                                    id: appRow
-                                    // Expanded state lives in root.appExpanded (key: application name), so it survives updates
-                                    readonly property string appKey: modelData ? String(modelData.key) : ""
-                                    readonly property bool expanded: root.appExpanded[appKey] === true
-                                    readonly property real periodTotal: modelData ? modelData.prx + modelData.ptx : 0
-                                    readonly property bool live: modelData ? (modelData.rx > 0 || modelData.tx > 0) : false
-                                    readonly property string lastActive: modelData ? root.appActivity(modelData, Date.now()) : ""
-                                    width: appTrafficColumn.width
-                                    height: appRowContent.implicitHeight + 12
-                                    radius: 6
-                                    color: root.alpha(root.themeText, .045)
-                                    border.width: 1
-                                    border.color: root.alpha(root.themeText, .07)
-                                    Column {
-                                        id: appRowContent
-                                        x: 8
-                                        y: 6
-                                        width: parent.width - 16
-                                        spacing: 4
-                                        Item {
-                                            width: parent.width
-                                            height: appHead.implicitHeight
-                                            Column {
-                                                id: appHead
-                                                width: parent.width
-                                                spacing: 4
-                                                RowLayout {
-                                                    width: parent.width
-                                                    spacing: 6
-                                                    // Place in the ranking only for applications with traffic in the period
-                                                    Text { text: appRow.periodTotal > 0 ? index + 1 : ""; color: root.themeSecondary; font.pixelSize: 10; font.bold: true; Layout.preferredWidth: 16; horizontalAlignment: Text.AlignRight }
-                                                    Text { text: modelData.display; color: root.themeText; font.pixelSize: 11; font.bold: true; elide: Text.ElideRight; Layout.fillWidth: true }
-                                                    Text { text: appRow.periodTotal > 0 ? root.formatBytes(appRow.periodTotal) : "—"; color: root.themeText; font.pixelSize: 11; font.bold: true }
-                                                    Text { text: appRow.expanded ? "⌄" : "›"; color: root.themeSecondary; font.pixelSize: 14; Layout.preferredWidth: 12; horizontalAlignment: Text.AlignHCenter }
-                                                }
-                                                // Share of the leader: received (blue) and sent (red)
-                                                Item {
-                                                    visible: appRow.periodTotal > 0
-                                                    x: 22
-                                                    width: parent.width - 22 - 18
-                                                    height: 5
-                                                    Rectangle { anchors.fill: parent; radius: 2.5; color: root.alpha(root.themeText, .08) }
-                                                    Rectangle {
-                                                        id: rxBar
-                                                        width: appRow.periodTotal > 0 ? parent.width * modelData.share * modelData.prx / appRow.periodTotal : 0
-                                                        height: parent.height
-                                                        radius: 2.5
-                                                        color: "#69a9ff"
-                                                    }
-                                                    Rectangle {
-                                                        x: rxBar.width
-                                                        width: appRow.periodTotal > 0 ? parent.width * modelData.share * modelData.ptx / appRow.periodTotal : 0
-                                                        height: parent.height
-                                                        radius: 2.5
-                                                        color: "#ff4040"
-                                                    }
-                                                }
-                                                // Received / sent in the period, then speed right now or the last activity
-                                                Row {
-                                                    visible: appRow.periodTotal > 0
-                                                    x: 22
-                                                    spacing: 4
-                                                    Image { source: Qt.resolvedUrl("../images/arrow-down.svg"); sourceSize.width: 8; sourceSize.height: 10; anchors.verticalCenter: parent.verticalCenter }
-                                                    Text { text: root.formatBytes(modelData.prx); color: root.themeText; font.pixelSize: 10; anchors.verticalCenter: parent.verticalCenter }
-                                                    Item { width: 3; height: 1 }
-                                                    Image { source: Qt.resolvedUrl("../images/arrow-up.svg"); sourceSize.width: 8; sourceSize.height: 10; anchors.verticalCenter: parent.verticalCenter }
-                                                    Text { text: root.formatBytes(modelData.ptx); color: root.themeText; font.pixelSize: 10; anchors.verticalCenter: parent.verticalCenter }
-                                                    Text {
-                                                        visible: text !== ""
-                                                        text: appRow.live ? "· now ↓ " + root.formatBytes(modelData.rx) + "/s  ↑ " + root.formatBytes(modelData.tx) + "/s"
-                                                            : (appRow.lastActive !== "" ? "· " + appRow.lastActive : "")
-                                                        color: appRow.live ? root.themePositive : root.themeSecondary
-                                                        font.pixelSize: 10
-                                                        anchors.verticalCenter: parent.verticalCenter
-                                                    }
-                                                }
-                                                // Connected, but nothing counted in the period (yet)
-                                                Text {
-                                                    visible: appRow.periodTotal <= 0
-                                                    x: 22
-                                                    width: parent.width - 22
-                                                    text: appRow.live ? "now ↓ " + root.formatBytes(modelData.rx) + "/s  ↑ " + root.formatBytes(modelData.tx) + "/s · not counted yet"
-                                                        : root.appIdleText(modelData, root.appPeriod, Date.now())
-                                                    color: appRow.live ? root.themePositive : root.themeSecondary
-                                                    font.pixelSize: 10
-                                                    elide: Text.ElideRight
-                                                }
-                                            }
-                                            MouseArea {
-                                                anchors.fill: parent
-                                                cursorShape: Qt.PointingHandCursor
-                                                onClicked: root.toggleAppExpanded(appRow.appKey)
-                                            }
-                                        }
-                                        Rectangle { visible: appRow.expanded; width: parent.width; height: 1; color: root.alpha(root.themeText, .08) }
-                                        Column {
-                                            visible: appRow.expanded
-                                            width: parent.width
-                                            spacing: 2
-                                            Text {
-                                                width: parent.width
-                                                text: modelData.pids.length
-                                                    ? (modelData.pids.length === 1 ? "PID " + modelData.pids[0] : modelData.pids.length + " processes · PID " + modelData.pids.join(", "))
-                                                      + " · " + modelData.tcp + " TCP · " + modelData.udp + " UDP"
-                                                    : "No connections at the moment"
-                                                color: root.themeSecondary
-                                                font.pixelSize: 10
-                                                wrapMode: Text.Wrap
-                                            }
-                                            Row {
-                                                visible: modelData.connections.length > 0
-                                                width: parent.width
-                                                height: 18
-                                                Text { text: "Protocol"; color: root.themeSecondary; font.pixelSize: 9; width: 52 }
-                                                Text { text: "Remote address"; color: root.themeSecondary; font.pixelSize: 9; width: parent.width - 52 - 72 - 86 }
-                                                Text { text: "Port"; color: root.themeSecondary; font.pixelSize: 9; width: 72; horizontalAlignment: Text.AlignRight }
-                                                Text { text: "Activity"; color: root.themeSecondary; font.pixelSize: 9; width: 86; horizontalAlignment: Text.AlignRight }
-                                            }
-                                            Repeater {
-                                                model: modelData.connections
-                                                delegate: Row {
-                                                    width: parent.width
-                                                    height: 22
-                                                    Text { text: modelData.protocol; color: root.themeText; font.pixelSize: 9; width: 52 }
-                                                    // "×N": N connections to this address and port
-                                                    Item {
-                                                        width: Math.max(70, parent.width - 52 - 72 - 86)
-                                                        height: connAddress.implicitHeight
-                                                        Text {
-                                                            id: connAddress
-                                                            text: modelData.address
-                                                            color: root.themeText
-                                                            font.pixelSize: 9
-                                                            elide: Text.ElideMiddle
-                                                            width: Math.min(implicitWidth, parent.width - (connCount.visible ? connCount.implicitWidth + 5 : 0))
-                                                        }
-                                                        Text {
-                                                            id: connCount
-                                                            // right after the text as drawn, also when a long address is shortened with "…"
-                                                            x: connAddress.contentWidth + 5
-                                                            visible: modelData.count > 1
-                                                            text: "×" + modelData.count
-                                                            color: root.themeLink
-                                                            font.pixelSize: 9
-                                                            font.bold: true
-                                                        }
-                                                    }
-                                                    Text { text: modelData.port; color: root.themeText; font.pixelSize: 9; width: 72; horizontalAlignment: Text.AlignRight }
-                                                    Text { text: modelData.state; color: root.themePositive; font.pixelSize: 9; width: 86; horizontalAlignment: Text.AlignRight }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    Text {
-                        text: root.appRatesState === "missing" || root.appUsageState === "missing" ? "Traffic unavailable: KDE System Monitor helper (ksgrd_network_helper) not found."
-                            : root.appRatesState === "failed" || root.appUsageState === "failed" ? "Traffic unavailable: KDE System Monitor helper could not start packet capture."
-                            : "Counted while Plasma runs (from login), updated every 2 minutes" + (root.appUsageUpdated !== "" ? ", last at " + root.appUsageUpdated : "")
-                              + ". \"now\" is a 3-second sample. Source: KDE System Monitor helper."
-                        color: root.themeSecondary
-                        font.pixelSize: 9
-                        Layout.fillWidth: true
-                        wrapMode: Text.Wrap
-                    }
-                    Controls.Button {
-                        text: root.appTrafficLoading ? "Reading…" : "Refresh"
-                        enabled: !root.appTrafficLoading
-                        Layout.fillWidth: true
-                        Layout.preferredHeight: 32
-                        onClicked: root.refreshAppTraffic()
-                    }
-                }
-
-                ColumnLayout {
-                    anchors.fill: parent
-                    spacing: 6
-                    visible: root.toolsTab === 5
-                    Text {
-                        text: "Watched devices"
-                        color: root.themeText
-                        font.pixelSize: 12
-                        font.bold: true
-                        Layout.fillWidth: true
-                    }
-                    RowLayout {
-                        Layout.fillWidth: true
-                        spacing: 5
-                        Controls.TextField {
-                            id: monitorIpField
-                            Layout.fillWidth: true
-                            placeholderText: "IP address"
-                            selectByMouse: true
-                            onTextChanged: {
-                                root.monitorError = ""
-                                var normalized = text.replace(/,/g, ".")
-                                if (normalized !== text) text = normalized
-                            }
-                        }
-                        Controls.Button {
-                            text: "Add"
-                            enabled: monitorIpField.text.trim() !== ""
-                            onClicked: { if (root.addWatchedDevice(monitorIpField.text, "—")) monitorIpField.clear() }
-                        }
-                    }
-                    Text {
-                        visible: root.monitorError !== ""
-                        text: root.monitorError
-                        color: root.themeNegative
-                        font.pixelSize: 10
-                        Layout.fillWidth: true
-                        wrapMode: Text.Wrap
-                    }
-                    // Status line and "Check now": the 30-second check can be run at once
-                    RowLayout {
-                        Layout.fillWidth: true
-                        spacing: 6
-                        Text {
-                            text: !root.watchedDevices.length ? "Add an IP or use Watch from Network Scanner."
-                                : (root.monitorLoading ? "Checking…" : "Status is checked every 30 seconds.")
-                            color: root.monitorLoading ? root.themeHighlight : root.themeSecondary
-                            font.pixelSize: 10
-                            Layout.fillWidth: true
-                            wrapMode: Text.Wrap
-                        }
-                        Controls.Button {
-                            visible: root.watchedDevices.length > 0
-                            text: "Check now"
-                            icon.name: "view-refresh"
-                            icon.width: 16
-                            icon.height: 16
-                            enabled: !root.monitorLoading
-                            Controls.ToolTip.visible: hovered
-                            Controls.ToolTip.delay: 500
-                            Controls.ToolTip.text: "Check all devices now"
-                            onClicked: root.monitorWatchedDevices()
-                        }
-                    }
-                    Flickable {
-                        Layout.fillWidth: true
-                        Layout.fillHeight: true
-                        clip: true
-                        contentWidth: width
-                        contentHeight: monitorColumn.height
-                        interactive: contentHeight > height
-                        boundsBehavior: Flickable.StopAtBounds
-                        Column {
-                            id: monitorColumn
-                            width: parent.width
-                            spacing: 4
-                            Repeater {
-                                model: root.watchedDevices
-                                delegate: Rectangle {
-                                    width: monitorColumn.width
-                                    height: 44
-                                    radius: 6
-                                    color: modelData.status === "UP" ? root.alpha(root.themePositive,.10) : (modelData.status === "DOWN" ? root.alpha(root.themeNegative,.10) : root.alpha(root.themeText,.045))
-                                    border.width: 1
-                                    border.color: modelData.status === "UP" ? root.alpha(root.themePositive,.35) : (modelData.status === "DOWN" ? root.alpha(root.themeNegative,.35) : root.alpha(root.themeText,.10))
-                                    RowLayout {
-                                        anchors.fill: parent
-                                        anchors.margins: 6
-                                        spacing: 7
-                                        ColumnLayout {
-                                            Layout.fillWidth: true
-                                            spacing: 1
-                                            TextEdit {
-                                                text: modelData.ip
-                                                color: root.themeText
-                                                font.pixelSize: 10
-                                                readOnly: true
-                                                selectByMouse: true
-                                                selectByKeyboard: true
-                                                cursorVisible: false
-                                                Layout.fillWidth: true
-                                            }
-                                            Text {
-                                                text: (modelData.mac && modelData.mac !== "—" ? modelData.mac + " · " : "") + "checked " + modelData.lastCheck + (modelData.via === "arp" ? " · ignores ping, answers ARP" : "")
-                                                color: root.themeSecondary
-                                                font.pixelSize: 9
-                                                Layout.fillWidth: true
-                                            }
-                                        }
-                                        Rectangle {
-                                            Layout.preferredWidth: 9
-                                            Layout.preferredHeight: 9
-                                            radius: 4.5
-                                            color: modelData.status === "UP" ? root.themePositive : (modelData.status === "DOWN" ? root.themeNegative : root.themeSecondary)
-                                        }
-                                        Controls.Button {
-                                            text: "×"
-                                            Layout.preferredWidth: 28
-                                            Layout.preferredHeight: 28
-                                            onClicked:root.removeWatchedDevice(index)
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
+                // Hardware: what the computer is made of, read once when the tab is opened
+                HardwareTab { root: widgetRoot }
             }
         }
     }

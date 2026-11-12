@@ -1,0 +1,46 @@
+# One click instead of a hand-made tag: Actions -> Release -> Run workflow -> version.
+# Sets the version everywhere, turns "## Unreleased" of the changelog into the release section,
+# tests, builds, commits, tags and publishes the release with the package.
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'New version, e.g. 6.1.60'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ inputs.version }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set the version
+        run: tools/release.sh "$VERSION"
+
+      - name: Unit tests
+        run: tests/run.sh
+
+      - name: Build package
+        run: ./build.sh
+
+      - name: Commit, tag and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "$VERSION: release"
+          git tag "v$VERSION"
+          git push origin HEAD:main "v$VERSION"
+
+      - name: Publish release
+        run: >
+          gh release create "v$VERSION" dist/*.zip dist/*.plasmoid
+          --title "My IP & Geo v$VERSION"
+          --notes-file dist/release-notes.md
