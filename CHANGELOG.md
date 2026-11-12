@@ -2,6 +2,9 @@
 
 All changes of My IP & Geo, newest first.
 
+## Unreleased
+- The widget is published in the KDE Store as "My IP and Geo" (https://store.kde.org/p/2381682/, category Plasma 6 Applets) and can be installed from Plasma's "Get New Widgets"; README has the link and the steps.
+
 ## v6.1.60
 - System load has a fourth bar, Disk: used space of the system disk (the filesystem of /) as "used / size GB · %", like memory and swap; read every 30 s.
 - New Hardware tab in the tools panel (☰ → Hardware): computer model, motherboard and firmware, system and kernel; processor with cores, threads, highest frequency and caches; memory with the installed and usable size, used and free slots, the maximum, and a tile per slot (size, type, speed, manufacturer, part number; empty slots are shown too); graphics adapters and connected displays; every disk with size, kind (SSD, NVMe, HDD, USB) and model; network adapters with driver and link speed; battery with design and current capacity and cycles; sound cards. Everything is read without root rights: sysfs, /proc, udev's hardware database and lsblk; `lspci` names PCI devices when it is installed. Serial numbers and MAC addresses are not shown. On systems whose udev does not keep the memory module data (before systemd 248) only the total is shown. Script: `contents/code/hardware.sh`.
