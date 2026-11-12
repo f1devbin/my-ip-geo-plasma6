@@ -6,7 +6,7 @@ It needs no root rights and nothing extra to install on Kubuntu: it only uses to
 
 **Version 6.1.60** · [Changelog](CHANGELOG.md) · [Download](https://github.com/f1devbin/my-ip-geo-plasma6/releases/latest)
 
-<img src="screenshots/main.png" width="412" alt="Main view: public IP, location, provider, CPU / memory / swap, traffic, external drives">
+<img src="screenshots/main.png" width="411" alt="Main view: public IP, location, provider, CPU / memory / swap, traffic, external drives">
 
 ## Features
 
