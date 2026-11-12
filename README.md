@@ -105,7 +105,7 @@ Install a local build with `kpackagetool6 -t Plasma/Applet -i dist/my-ip-geo-pla
 
 Layout: `package/` is the Plasma package: `metadata.json`; `contents/ui/main.qml` (state, logic, main view and header) with one file per tools tab next to it (`ScannerTab.qml`, `DiagnosticsTab.qml`, `SpeedTab.qml`, `AppsTab.qml`, `MonitorTab.qml`, `HardwareTab.qml`, `SettingsPanel.qml`); the helper scripts in `contents/code/`.
 
-GitHub Actions runs the unit tests and the run-time check on every push and pull request, and a 30-minute run-time check every week. A release is one step: Actions → Release → Run workflow with the new version; it moves the "Unreleased" changelog section to that version, tests, builds, tags and publishes the package.
+GitHub Actions runs the unit tests and the run-time check on every push and pull request, and a 30-minute run-time check every week. A release is one step: Actions → Release → Run workflow with the new version; it moves the "Unreleased" changelog section to that version, tests, builds, tags and publishes the package. After that the new `.plasmoid` is uploaded to the [KDE Store page](https://store.kde.org/p/2381682/) (Edit Product → Files, and the version in Basics), so Plasma's "Get New Widgets" offers the update.
 
 ## License
 

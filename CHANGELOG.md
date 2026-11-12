@@ -3,7 +3,7 @@
 All changes of My IP & Geo, newest first.
 
 ## Unreleased
-- The widget is published in the KDE Store as "My IP and Geo" (https://store.kde.org/p/2381682/, category Plasma 6 Applets) and can be installed from Plasma's "Get New Widgets"; README has the link and the steps.
+- The widget is published in the KDE Store as "My IP and Geo" (https://store.kde.org/p/2381682/, category Plasma 6 Applets) and can be installed from Plasma's "Get New Widgets"; README has the link and the steps, and the release steps include uploading each new version to the store.
 
 ## v6.1.60
 - System load has a fourth bar, Disk: used space of the system disk (the filesystem of /) as "used / size GB · %", like memory and swap; read every 30 s.
